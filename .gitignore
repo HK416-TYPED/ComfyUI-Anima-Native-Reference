@@ -1,0 +1,40 @@
+﻿# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editors
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs and temporary files
+*.log
+*.tmp
+temp/
+output/
+
+# Model weights must remain outside this repository
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.bin
+
+# Secrets
+.env
+.env.*
+!.env.example
+*.key

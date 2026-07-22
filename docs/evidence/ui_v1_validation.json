@@ -1,0 +1,23 @@
+{
+  "official_schema_source": "https://raw.githubusercontent.com/Comfy-Org/docs/main/specs/workflow_json.mdx",
+  "schema_title": "ComfyUI Workflow v1.0 (latest official docs)",
+  "schema_validation_errors": 0,
+  "workflow_version": 1,
+  "node_count": 7,
+  "link_count": 5,
+  "live_custom_node_types_registered": [
+    "AnimaNativeRefV2Loader",
+    "AnimaNativeRefV2Generate"
+  ],
+  "live_object_info_input_order_matches": true,
+  "graph_link_integrity": true,
+  "template_index_entry": [
+    "anima_ref_v2_e180"
+  ],
+  "static_template_served_http_200": true,
+  "userdata_workflow_post_and_get_roundtrip": true,
+  "source_sha256": "5ed34f1805c6cca513591f673a12f51f9e77f553f86cd1dd2d82c5f5b55c6e76",
+  "served_sha256": "5ed34f1805c6cca513591f673a12f51f9e77f553f86cd1dd2d82c5f5b55c6e76",
+  "roundtrip_sha256": "5ed34f1805c6cca513591f673a12f51f9e77f553f86cd1dd2d82c5f5b55c6e76",
+  "byte_exact_source_served_roundtrip": true
+}

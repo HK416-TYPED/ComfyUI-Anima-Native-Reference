@@ -1,0 +1,655 @@
+{
+  "schema_version": 1,
+  "release": "v0.1.0-e180",
+  "package": "ComfyUI-Anima-Native-Reference",
+  "model": {
+    "checkpoint": "anima-native-ref-v2-e180-step64080-256px.safetensors",
+    "checkpoint_sha256": "1f970a7867dd7b65858d30b58135134ce84fd3b552ab27fc9f07e7f15209c6dd",
+    "checkpoint_bytes": 4271362542,
+    "checkpoint_included": false
+  },
+  "excluded": [
+    "*.pyc",
+    ".git",
+    ".pytest_cache",
+    ".ruff_cache",
+    "__pycache__"
+  ],
+  "files": [
+    {
+      "path": "LICENSE",
+      "bytes": 11342,
+      "sha256": "e8d3af270e7b15ccab908481e4a8b2da03b27cc7ada3c9826cf709df5eb49c9e"
+    },
+    {
+      "path": "README.md",
+      "bytes": 10618,
+      "sha256": "4e8643500fe479006591128cbc3ea13644be7a88bc6460516703f7125f6d894c"
+    },
+    {
+      "path": "RUNTIME_API.md",
+      "bytes": 2817,
+      "sha256": "9eb314a3928205e8862e8fbf35c9e628841cc1c5e2ce0f9fa31921894aeac0b4"
+    },
+    {
+      "path": "TEST_REPORT.md",
+      "bytes": 4804,
+      "sha256": "7b5cea16bccaa5e058c3af9b280f906a5abecb3f906cec13a8015fa95a99f200"
+    },
+    {
+      "path": "__init__.py",
+      "bytes": 506,
+      "sha256": "2a3f5d4fc193f7e893b37e4bf261a2cc6ea6e0b046742b3dafb048c871c47f9e"
+    },
+    {
+      "path": "api_workflows/anima_ref_v2_e180_api.json",
+      "bytes": 2058,
+      "sha256": "26cec56a93fd2cc9db16a1c0ac8555aaa9d19a4326eb14e515edea7b365253d0"
+    },
+    {
+      "path": "docs/INTEGRATION_REPORT.md",
+      "bytes": 4146,
+      "sha256": "5666122d3d0e09f3d5b859643c5d30825a257fe7ce4d874a6b0b9a4eb3db7d20"
+    },
+    {
+      "path": "docs/evidence/INTEGRATION_SUMMARY.json",
+      "bytes": 4384,
+      "sha256": "e218b0f3a16fc850ff0c2912b719e2234f33ea72751e3a63f5ad41ae875e85fc"
+    },
+    {
+      "path": "docs/evidence/pixel_comparison.json",
+      "bytes": 7140,
+      "sha256": "4cf6753668aeb0c40aa8b75d06d343c8a18704117f9bb16df7cdfffa8996e5c2"
+    },
+    {
+      "path": "docs/evidence/ui_v1_validation.json",
+      "bytes": 922,
+      "sha256": "e43777f5bd7446f00b3744d4a4cd551527240c42b92d839e905a99e17c8ffe0c"
+    },
+    {
+      "path": "docs/examples/e180-heldout-000052-comfy-output.png",
+      "bytes": 77242,
+      "sha256": "2f494a78a3f16f538fb8c89a51812ff036d758b92a5cc36119085658b231255a"
+    },
+    {
+      "path": "example_workflows/anima_ref_v2_e180.jpg",
+      "bytes": 186905,
+      "sha256": "9f6ae5c2a5ea960c21112e81ae9c3634871b56263db5ffb45ec8b9e0b659c3e8"
+    },
+    {
+      "path": "example_workflows/anima_ref_v2_e180.json",
+      "bytes": 11200,
+      "sha256": "5ed34f1805c6cca513591f673a12f51f9e77f553f86cd1dd2d82c5f5b55c6e76"
+    },
+    {
+      "path": "nodes.py",
+      "bytes": 10906,
+      "sha256": "2e0550c7678aba023926d2b054c826087a5a72803ec0a226ff6bcd8243b6e1ad"
+    },
+    {
+      "path": "requirements.txt",
+      "bytes": 390,
+      "sha256": "5d3949381e55f1c74319af74e5d34d1cb314188a24cd1107c18bd5de3eb1f193"
+    },
+    {
+      "path": "runtime.py",
+      "bytes": 59512,
+      "sha256": "6d20a28c0e33cca2ffa62346fd11205db8f6ed38ee04deb98211a8a528aea680"
+    },
+    {
+      "path": "tests/test_nodes_and_workflows.py",
+      "bytes": 6336,
+      "sha256": "f04884eaa5b86df67e10102f36c8d95a1b8ad56e8ccc175cc657910164298a56"
+    },
+    {
+      "path": "tests/test_runtime.py",
+      "bytes": 23206,
+      "sha256": "dc10c352b765fac1e1182a5b4775776a0771c4f1ee2fdb88d3968b6650bde305"
+    },
+    {
+      "path": "vendor/README.md",
+      "bytes": 1500,
+      "sha256": "004a4daf2d623394603621c6789a8b4bc8d890fe1bdf582e9d01d589811d0e0d"
+    },
+    {
+      "path": "vendor/VENDOR_MANIFEST.json",
+      "bytes": 18285,
+      "sha256": "74163ffb8ebb84746c4f676986bcc24a4860451b8ae4d233d6f3844733e6ff9a"
+    },
+    {
+      "path": "vendor/anima_edit/LICENSE.md",
+      "bytes": 11342,
+      "sha256": "e8d3af270e7b15ccab908481e4a8b2da03b27cc7ada3c9826cf709df5eb49c9e"
+    },
+    {
+      "path": "vendor/anima_edit/__init__.py",
+      "bytes": 153,
+      "sha256": "b199bf7fc58d64d479a68d25cf1d186033145d2d63e2e25db5ddf88b4c7aa817"
+    },
+    {
+      "path": "vendor/anima_edit/anima_minimal_inference.py",
+      "bytes": 62672,
+      "sha256": "aebb80e1d55c8d72442dd6d3154dc81a9c62becbdd4d069a1bdaa0a7dfa45d7c"
+    },
+    {
+      "path": "vendor/anima_edit/configs/qwen3_06b/config.json",
+      "bytes": 727,
+      "sha256": "504a6b58c4271583724e66584b6b7698aea18450209df6b2f7582df0e89cee59"
+    },
+    {
+      "path": "vendor/anima_edit/configs/qwen3_06b/merges.txt",
+      "bytes": 1671853,
+      "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5"
+    },
+    {
+      "path": "vendor/anima_edit/configs/qwen3_06b/tokenizer.json",
+      "bytes": 7031645,
+      "sha256": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539"
+    },
+    {
+      "path": "vendor/anima_edit/configs/qwen3_06b/tokenizer_config.json",
+      "bytes": 9678,
+      "sha256": "3c04ed3ca964ea2f6b2b5faf0dc4d31aec1cb1e8b4bcf63f402d295046b422b5"
+    },
+    {
+      "path": "vendor/anima_edit/configs/qwen3_06b/vocab.json",
+      "bytes": 2776833,
+      "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+    },
+    {
+      "path": "vendor/anima_edit/configs/t5_old/config.json",
+      "bytes": 1203,
+      "sha256": "36a166b5825808ff68969ee3b8b5dc6b08ed43a7631d4db708a368900eb1edf8"
+    },
+    {
+      "path": "vendor/anima_edit/configs/t5_old/spiece.model",
+      "bytes": 791656,
+      "sha256": "d60acb128cf7b7f2536e8f38a5b18a05535c9e14c7a355904270e15b0945ea86"
+    },
+    {
+      "path": "vendor/anima_edit/configs/t5_old/tokenizer.json",
+      "bytes": 1389353,
+      "sha256": "d2acde0d8d71dd30a711834b07781b9c89feaac33fd332f60507699282740066"
+    },
+    {
+      "path": "vendor/anima_edit/library/__init__.py",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "vendor/anima_edit/library/adafactor_fused.py",
+      "bytes": 4376,
+      "sha256": "f300446a375002cba77f5ca44d1948a848666ca9b789987b911844e0786e79cc"
+    },
+    {
+      "path": "vendor/anima_edit/library/anima_models.py",
+      "bytes": 181508,
+      "sha256": "3df0893865a05cd1871735af0fd66ca815974b15fcbb14b056bcf789a47fdad6"
+    },
+    {
+      "path": "vendor/anima_edit/library/anima_train_utils.py",
+      "bytes": 50490,
+      "sha256": "c762fc084ab27ade4a8b46b67ffbed62f3f830d76e01631ea7b3ab007d88414a"
+    },
+    {
+      "path": "vendor/anima_edit/library/anima_utils.py",
+      "bytes": 26205,
+      "sha256": "ccccc6bb33e69a3a07c09fc9bcf870dc23fb107c3674adf464e1aab987f76d85"
+    },
+    {
+      "path": "vendor/anima_edit/library/anima_vlm.py",
+      "bytes": 31658,
+      "sha256": "5450a13b01719cb6b35fbd7ae8e98b3f8534cd617117f204dd9982dbaac6fafe"
+    },
+    {
+      "path": "vendor/anima_edit/library/anima_vlm_p1.py",
+      "bytes": 49154,
+      "sha256": "9068f5de1fd954c11613862757979d45d03917b218655617452b12a269faa31b"
+    },
+    {
+      "path": "vendor/anima_edit/library/attention.py",
+      "bytes": 11409,
+      "sha256": "4aa915b41bfa157332960acf3340370b5da5f5ac4b01e1689ec4aaec47714cf0"
+    },
+    {
+      "path": "vendor/anima_edit/library/attention_processors.py",
+      "bytes": 7697,
+      "sha256": "2a2ef9efa2208a357adb4b761aaae2e1177be87f37d14873cdd3effd527dcef1"
+    },
+    {
+      "path": "vendor/anima_edit/library/chroma_models.py",
+      "bytes": 28117,
+      "sha256": "9ac6d2b573ea6b1d65b6eacdbe672a0ac2039dbffc86cdc2020f1b262f806335"
+    },
+    {
+      "path": "vendor/anima_edit/library/config_util.py",
+      "bytes": 28617,
+      "sha256": "d76d5ae519849b10e4b21546740a90085fea9ae8da8d1d9b5d6e29f545fb3bf2"
+    },
+    {
+      "path": "vendor/anima_edit/library/custom_offloading_utils.py",
+      "bytes": 13300,
+      "sha256": "e58750d0cd5e8c4d917d411cce5646d3a8ceabfc9d9c0ba55f81e56620cca075"
+    },
+    {
+      "path": "vendor/anima_edit/library/custom_train_functions.py",
+      "bytes": 22069,
+      "sha256": "309943ccea7bb051b3f01d919d1cafece3c2d1d53d425cd4fcc7ea6ed76a6ce9"
+    },
+    {
+      "path": "vendor/anima_edit/library/deepspeed_utils.py",
+      "bytes": 6928,
+      "sha256": "3c48dd3bb1a006ef81a027e6c0dc9f53dc5555e576a072bea705e9c855819558"
+    },
+    {
+      "path": "vendor/anima_edit/library/device_utils.py",
+      "bytes": 2705,
+      "sha256": "207e8042098773beda50378e80de2a50c216ed7ca3ba5bc023db00bbaf8285c3"
+    },
+    {
+      "path": "vendor/anima_edit/library/flux_models.py",
+      "bytes": 49420,
+      "sha256": "73b69dd6bcb3eee3c1d45b666380d096800c84e36e1e3da91da31efe6b90f222"
+    },
+    {
+      "path": "vendor/anima_edit/library/flux_train_utils.py",
+      "bytes": 27480,
+      "sha256": "1e3647b5d863d7ae6d1227593fccc63a05447d02bf56cf5603acb91d2459519b"
+    },
+    {
+      "path": "vendor/anima_edit/library/flux_utils.py",
+      "bytes": 23039,
+      "sha256": "276a782856315572c69a97d40b2d1bfd1904e15c6ec97b11911d641555948d7a"
+    },
+    {
+      "path": "vendor/anima_edit/library/fp8_optimization_utils.py",
+      "bytes": 20154,
+      "sha256": "847eb62bdc8e002c061d42ef1903a9a64344ad761e3b7698dd6d4b61fe69250b"
+    },
+    {
+      "path": "vendor/anima_edit/library/huggingface_util.py",
+      "bytes": 3148,
+      "sha256": "f58619e65753d98e958c9a0a326470a28c2a2121dd44074bb797d2f4da862d88"
+    },
+    {
+      "path": "vendor/anima_edit/library/hunyuan_image_models.py",
+      "bytes": 19484,
+      "sha256": "c825f153e2babf8fb5bda4438c49f4d1e0568183bfc306a7ad2e0be087f96f06"
+    },
+    {
+      "path": "vendor/anima_edit/library/hunyuan_image_modules.py",
+      "bytes": 31577,
+      "sha256": "cc9776504e26627fde36064429f22091edfe684f6394e8f07d92d3e45fd5386d"
+    },
+    {
+      "path": "vendor/anima_edit/library/hunyuan_image_text_encoder.py",
+      "bytes": 50623,
+      "sha256": "a2c7763ea5378ce2cc1b84a0b2d3442bf9ed10ec67d3b434cb602bc333a5d9b1"
+    },
+    {
+      "path": "vendor/anima_edit/library/hunyuan_image_utils.py",
+      "bytes": 17300,
+      "sha256": "b9e4204c1aad7d3a07947948d16c80e15ae9486d781ed7611ff37ae11c1c15cd"
+    },
+    {
+      "path": "vendor/anima_edit/library/hunyuan_image_vae.py",
+      "bytes": 28824,
+      "sha256": "a0aa60e778a36eb991affa012364fffd87cd773827c82e6b04f9b4231930be6d"
+    },
+    {
+      "path": "vendor/anima_edit/library/hypernetwork.py",
+      "bytes": 6742,
+      "sha256": "de1bd85aad0d17b2401a17abae855160cf8e4e0cbcf8fb1787ada87fe1c263b1"
+    },
+    {
+      "path": "vendor/anima_edit/library/ipex/__init__.py",
+      "bytes": 11567,
+      "sha256": "bed784874ba5a222d589860d1f5e2d95fecfec9c4d8606abd64e5705d0b4a308"
+    },
+    {
+      "path": "vendor/anima_edit/library/ipex/attention.py",
+      "bytes": 6364,
+      "sha256": "39fb3e94f0bf044eff81da53bcfeb688fbb0ca84fd87e2787f573e275ff82858"
+    },
+    {
+      "path": "vendor/anima_edit/library/ipex/diffusers.py",
+      "bytes": 5400,
+      "sha256": "0381ecaf52de0eef04e4b27ab9f6ba469c70c9b548194458389d8bf915eaa7c2"
+    },
+    {
+      "path": "vendor/anima_edit/library/ipex/hijacks.py",
+      "bytes": 20585,
+      "sha256": "4446d11e570094c129a9b949bd516501a11ad8c8c9d6546780f70b84a38bfe0e"
+    },
+    {
+      "path": "vendor/anima_edit/library/jpeg_xl_util.py",
+      "bytes": 6595,
+      "sha256": "ed31189c5d23924d743730817c51f405937ca386ff8ae654e9e07200058aef42"
+    },
+    {
+      "path": "vendor/anima_edit/library/leco_train_util.py",
+      "bytes": 19205,
+      "sha256": "edf45a7c93df107f8ec4f31c6552b6638a4e3076fc2fc1af22cd69fd0c702d48"
+    },
+    {
+      "path": "vendor/anima_edit/library/lora_utils.py",
+      "bytes": 15644,
+      "sha256": "26c9e456c11582fc53c6b72d6d7686a31884bd10cd430e6ba32d9fd2436171b7"
+    },
+    {
+      "path": "vendor/anima_edit/library/lpw_stable_diffusion.py",
+      "bytes": 63481,
+      "sha256": "358e4894cb7bf13cfdc59b6c54cc303bafe4febe8c3966375d787870a1250003"
+    },
+    {
+      "path": "vendor/anima_edit/library/lumina_models.py",
+      "bytes": 54868,
+      "sha256": "f100322d9112b9fa8f484720dc18edeec794480f1e482a02ac576bc5de2b5a1a"
+    },
+    {
+      "path": "vendor/anima_edit/library/lumina_train_util.py",
+      "bytes": 49210,
+      "sha256": "fe0db21157fe8cd7cd31fb7e7aa48ae4c29d86f659e564e7279219b4ec4850d3"
+    },
+    {
+      "path": "vendor/anima_edit/library/lumina_util.py",
+      "bytes": 9782,
+      "sha256": "6a51806d67080adec88af7f71223b6626a5a46cab2d806cb968650ebd8415a85"
+    },
+    {
+      "path": "vendor/anima_edit/library/mask_generator.py",
+      "bytes": 13162,
+      "sha256": "3d338100690bd2775d064637c95505222fdb23ce174aa34623c2241ea2c7e606"
+    },
+    {
+      "path": "vendor/anima_edit/library/model_util.py",
+      "bytes": 58600,
+      "sha256": "67c6dac4c1aad45dda4725c1727abc191e74f1500cb9c7458fa65aae3cf874c9"
+    },
+    {
+      "path": "vendor/anima_edit/library/original_unet.py",
+      "bytes": 70656,
+      "sha256": "9f47853119722faf89f106b42af5109d56bdfed2a1a769718d2dfab837fdb396"
+    },
+    {
+      "path": "vendor/anima_edit/library/qwen_image_autoencoder_kl.py",
+      "bytes": 71042,
+      "sha256": "534c1a6e947ac87aee3b782083b1329c1187fe70b98d46ad44499750411fc9f9"
+    },
+    {
+      "path": "vendor/anima_edit/library/safetensors_utils.py",
+      "bytes": 20113,
+      "sha256": "9a344d05f78354674fff90751503a7bfdb25a1bb28e57100fdd8ecf2f9924184"
+    },
+    {
+      "path": "vendor/anima_edit/library/sai_model_spec.py",
+      "bytes": 23651,
+      "sha256": "f2a1bba8c878c191664d955496d55c1c08f20b9dad5c4222d98f50fa7724971b"
+    },
+    {
+      "path": "vendor/anima_edit/library/sd3_models.py",
+      "bytes": 54693,
+      "sha256": "faa8d1865f95ba1269d5c92ac996499153634a6c4379e50a260c6b93706b54bc"
+    },
+    {
+      "path": "vendor/anima_edit/library/sd3_train_utils.py",
+      "bytes": 37227,
+      "sha256": "ff84a4ac5db2d587bd5bdb6a6bbf6a52aec2915730a78acd086fe5a0adb81c36"
+    },
+    {
+      "path": "vendor/anima_edit/library/sd3_utils.py",
+      "bytes": 10731,
+      "sha256": "9264e8c603d94c57d9599a56bc291e8f4312ee98e2f086fc1fa9ddbe8a794053"
+    },
+    {
+      "path": "vendor/anima_edit/library/sdxl_lpw_stable_diffusion.py",
+      "bytes": 65540,
+      "sha256": "b2dbc9cc9f5a398ae5adaf7cbcf38587e3f26e9bae0aa72e1079319085821fe1"
+    },
+    {
+      "path": "vendor/anima_edit/library/sdxl_model_util.py",
+      "bytes": 23042,
+      "sha256": "891eaaf1ec3abb1b0507ef4403703c94808576dd38f95fe23e2cea767053d25d"
+    },
+    {
+      "path": "vendor/anima_edit/library/sdxl_original_control_net.py",
+      "bytes": 10080,
+      "sha256": "1c95aeff88486078573c6f4b5caab1b3db92fefd78b48dbf9eef61433c968c54"
+    },
+    {
+      "path": "vendor/anima_edit/library/sdxl_original_unet.py",
+      "bytes": 45808,
+      "sha256": "1b9b6f1ff3ded4e907c0e55afa109173aad95c7ec19121b6ceddd67faca6ebbd"
+    },
+    {
+      "path": "vendor/anima_edit/library/sdxl_train_util.py",
+      "bytes": 15107,
+      "sha256": "ab224fef0ff6267153ff4e0455512ece30e01f19db15955a7a473a46987c9eae"
+    },
+    {
+      "path": "vendor/anima_edit/library/slicing_vae.py",
+      "bytes": 24399,
+      "sha256": "23f267fd54c77ef10a6fce276d6537fac20eea5221b200bb9e0e9b6e6b4d3d23"
+    },
+    {
+      "path": "vendor/anima_edit/library/strategy_anima.py",
+      "bytes": 20706,
+      "sha256": "6418a4dc9d8295d49163352d753dce862956afbee91f311e86f7b1a33ed99c38"
+    },
+    {
+      "path": "vendor/anima_edit/library/strategy_base.py",
+      "bytes": 26320,
+      "sha256": "7a851ad91e6db04d9cfb02e6c772e4f00b96d65a9d010fa75b9c8d84a7257816"
+    },
+    {
+      "path": "vendor/anima_edit/library/strategy_flux.py",
+      "bytes": 11349,
+      "sha256": "33cbfa9b90d6ebdcc9a7b4f84064f0e37d7242bd26bb1918d53c3a37c95cecf1"
+    },
+    {
+      "path": "vendor/anima_edit/library/strategy_hunyuan_image.py",
+      "bytes": 9327,
+      "sha256": "4089a1da1f106fe3bb9646a3dab754631d6fe33ce36726abbf588c44fe8539c0"
+    },
+    {
+      "path": "vendor/anima_edit/library/strategy_lumina.py",
+      "bytes": 12465,
+      "sha256": "3320b39ab6e69431ec96d6b0bfa75a81d11d438b651d1333fc458d053b58faa5"
+    },
+    {
+      "path": "vendor/anima_edit/library/strategy_sd.py",
+      "bytes": 8702,
+      "sha256": "869c019bcb088e1f8b1407efa93d037cecddbc4615677ef6cbaaa16bd2298487"
+    },
+    {
+      "path": "vendor/anima_edit/library/strategy_sd3.py",
+      "bytes": 19132,
+      "sha256": "2d9de49f1da08deca0eb0993833940ecaa543badd3733913cbfd55d768dfdfb2"
+    },
+    {
+      "path": "vendor/anima_edit/library/strategy_sdxl.py",
+      "bytes": 14376,
+      "sha256": "e109bb8ed50294f24f2ef1529fe9395732bedc9c68ae198e3570c6cf1b75c310"
+    },
+    {
+      "path": "vendor/anima_edit/library/train_util.py",
+      "bytes": 328866,
+      "sha256": "68a7c6b7ff6eeec93392ddae253c9447423316aac96e854ee1477f1145e169a5"
+    },
+    {
+      "path": "vendor/anima_edit/library/utils.py",
+      "bytes": 20065,
+      "sha256": "e5693231f3d9265e21ab6363fd585376b6ee906f5eb08427f0a71933cdc6094b"
+    },
+    {
+      "path": "vendor/anima_edit/networks/__init__.py",
+      "bytes": 66,
+      "sha256": "1d17bc46e4bfce28980a78ba60272de78fdd9af64b18975a7555f69273d23408"
+    },
+    {
+      "path": "vendor/anima_edit/networks/check_lora_weights.py",
+      "bytes": 1513,
+      "sha256": "42587ec94c3b066332f55ce2f7304a45e918102403556594a36ff9883bfc2da8"
+    },
+    {
+      "path": "vendor/anima_edit/networks/control_net_lllite.py",
+      "bytes": 19212,
+      "sha256": "f917e9aeb7e30160f92b9012d9d92c7020d21442161ff70bd6d1bb72b938ec86"
+    },
+    {
+      "path": "vendor/anima_edit/networks/control_net_lllite_anima.py",
+      "bytes": 37864,
+      "sha256": "8c2989779af6dbd807336d2ab8b4ce58ba0c9bd400db86778c3be14db4aff11a"
+    },
+    {
+      "path": "vendor/anima_edit/networks/control_net_lllite_for_train.py",
+      "bytes": 20984,
+      "sha256": "573811b3be4a5ed81da1888d183fe9326fcddcf392dcea3d7b573839aa84ca1e"
+    },
+    {
+      "path": "vendor/anima_edit/networks/convert_anima_lora_to_comfy.py",
+      "bytes": 7685,
+      "sha256": "5cf3cc632603ff69012c475ffc5d81f01682829b4f76ea201e116a0e05eca80d"
+    },
+    {
+      "path": "vendor/anima_edit/networks/convert_flux_lora.py",
+      "bytes": 20114,
+      "sha256": "cc5b2965b8d8a4926a168ab82ea6bb3d3a3b6dd6b5c9157f53d4e478d80f250f"
+    },
+    {
+      "path": "vendor/anima_edit/networks/convert_hunyuan_image_lora_to_comfy.py",
+      "bytes": 2793,
+      "sha256": "fe7c38575b8f43b193857dfb5b2968d3a49d431844cce78cd57b1941955dcc4a"
+    },
+    {
+      "path": "vendor/anima_edit/networks/dora.py",
+      "bytes": 25808,
+      "sha256": "e0808bb03f3d9257dc4b5f0445da31adb633ddc6025628a1e17ce70084572e34"
+    },
+    {
+      "path": "vendor/anima_edit/networks/dylora.py",
+      "bytes": 21365,
+      "sha256": "c4dd9037135c40d1ee6d3c0b18a0e43e17ed789c27bec8290d53bdf9b113eb26"
+    },
+    {
+      "path": "vendor/anima_edit/networks/extract_lora_from_dylora.py",
+      "bytes": 4338,
+      "sha256": "d5509289850bfb77700a2a93bd729686a129ee7ae2d5381c4378917c55ea4817"
+    },
+    {
+      "path": "vendor/anima_edit/networks/extract_lora_from_models.py",
+      "bytes": 14093,
+      "sha256": "8b3e5a1d60efbffe1640461410e68525447f4a274740f05b2fc7bbb5d1130b10"
+    },
+    {
+      "path": "vendor/anima_edit/networks/flux_extract_lora.py",
+      "bytes": 7673,
+      "sha256": "811b5380bec0b8b2ce36fd837aeff2e9156453bf8288bfed6a8a60b9ad300392"
+    },
+    {
+      "path": "vendor/anima_edit/networks/flux_merge_lora.py",
+      "bytes": 33630,
+      "sha256": "deb3a8944508a3b4c541187ba60237a1db7269b2a0af97c85d10baea12d9386c"
+    },
+    {
+      "path": "vendor/anima_edit/networks/loha.py",
+      "bytes": 24267,
+      "sha256": "2b48d69b0d687272ecfbc882b946fd6e2575e6e14bfa37cb35d1ff77f5af25e8"
+    },
+    {
+      "path": "vendor/anima_edit/networks/lokr.py",
+      "bytes": 24285,
+      "sha256": "73fdb45fea8440cd89332e29be8bbefa147feb5e287ae0019f86fa9fd92f6dc2"
+    },
+    {
+      "path": "vendor/anima_edit/networks/lora.py",
+      "bytes": 59104,
+      "sha256": "884e34f582c01bdbe425b5cab552cf6a105c35e68f7b8b9b675290ff63cbcd1f"
+    },
+    {
+      "path": "vendor/anima_edit/networks/lora_anima.py",
+      "bytes": 33984,
+      "sha256": "b1df0f693eac0c36d3217cff1f286151a98e635cd925d9ccd255883c5c4f710b"
+    },
+    {
+      "path": "vendor/anima_edit/networks/lora_diffusers.py",
+      "bytes": 25958,
+      "sha256": "43263856b084a6dd88a9f9b9e0960b9b05a5f65d7d6620b6caa327e054d33273"
+    },
+    {
+      "path": "vendor/anima_edit/networks/lora_fa.py",
+      "bytes": 50887,
+      "sha256": "f736738c07ddd85f2976ca1280e7ca1e91a1052b3d97ce81bd7373f571097106"
+    },
+    {
+      "path": "vendor/anima_edit/networks/lora_flux.py",
+      "bytes": 61423,
+      "sha256": "9b2740944db4a74934c839834126743c03bfb593cbcfa2037195e37f3d2d6c40"
+    },
+    {
+      "path": "vendor/anima_edit/networks/lora_hunyuan_image.py",
+      "bytes": 14831,
+      "sha256": "ffed77be375a7d68648ef08898bdbd9e285b151eee6eff2a0aa8ea59cec4b186"
+    },
+    {
+      "path": "vendor/anima_edit/networks/lora_interrogator.py",
+      "bytes": 6235,
+      "sha256": "48e4e2cd2fa487771487102af75639e88dbf0ca652f77506ced4fe5780093e4b"
+    },
+    {
+      "path": "vendor/anima_edit/networks/lora_lumina.py",
+      "bytes": 46193,
+      "sha256": "21df3d3a13fea6cc5eee59173884cdc13593d50b78754c6c31ccd4c0f1e59f39"
+    },
+    {
+      "path": "vendor/anima_edit/networks/lora_sd3.py",
+      "bytes": 35840,
+      "sha256": "127b9806bbe9f3428c3666ac3e93ae294141d34a45c793c9ed21b9b452bc7671"
+    },
+    {
+      "path": "vendor/anima_edit/networks/merge_lora.py",
+      "bytes": 14890,
+      "sha256": "c655f36850381747e7b075f120b038223c81b1ca325c0f841353562185cd1efa"
+    },
+    {
+      "path": "vendor/anima_edit/networks/merge_lora_old.py",
+      "bytes": 7416,
+      "sha256": "914c64291101510db8f585b041197a7fb2bf0dffaaca9d35efbd262a29b02423"
+    },
+    {
+      "path": "vendor/anima_edit/networks/network_base.py",
+      "bytes": 24180,
+      "sha256": "9d00c71127af77d2c586c68dbfa53b0ddc51288181e532042b1590bca2628b7f"
+    },
+    {
+      "path": "vendor/anima_edit/networks/oft.py",
+      "bytes": 16346,
+      "sha256": "3ef0257e0961e71c814d336fa8e5a2ad6b0906c725abd41717597f61c97e13d4"
+    },
+    {
+      "path": "vendor/anima_edit/networks/oft_flux.py",
+      "bytes": 16750,
+      "sha256": "06be30512a1cd1dd62530cadbeff707c5ce4fc7476d885a2192c95e7c61f45e4"
+    },
+    {
+      "path": "vendor/anima_edit/networks/resize_lora.py",
+      "bytes": 16135,
+      "sha256": "3abc60090e65fff9c22cc0493653aaaaabdafd4c38ee00c514c23a02acfd725a"
+    },
+    {
+      "path": "vendor/anima_edit/networks/sdxl_merge_lora.py",
+      "bytes": 20938,
+      "sha256": "34446ac337dab8f1420186b378f996bf27d78207ec863ea1a72b22bfc4bd6410"
+    },
+    {
+      "path": "vendor/anima_edit/networks/svd_merge_lora.py",
+      "bytes": 17747,
+      "sha256": "05229e70c8cd8efae2815270b1a810a275c6c4b5be24deb6229bb42b266b3fa2"
+    },
+    {
+      "path": "vendor/anima_edit/requirements.txt",
+      "bytes": 915,
+      "sha256": "dc4325b9f2504705faf4ddd1ddf5238e48c65ef3953a7072c4e2907e43be11e7"
+    }
+  ]
+}
