@@ -80,8 +80,8 @@ setup_logging()
 import logging
 
 logger = logging.getLogger(__name__)
-# from _anima_native_ref_vendor.library.attention_processors import FlashAttnProcessor
-# from _anima_native_ref_vendor.library.hypernetwork import replace_attentions_for_hypernetwork
+# from library.attention_processors import FlashAttnProcessor
+# from library.hypernetwork import replace_attentions_for_hypernetwork
 from _anima_native_ref_vendor.library.original_unet import UNet2DConditionModel
 
 HIGH_VRAM = False
@@ -192,6 +192,12 @@ class ImageInfo:
         negative_image_paths: Optional[List[str]] = None,
         class_reference_image_paths: Optional[List[str]] = None,
         reference_slot_ids: Optional[List[int]] = None,
+        equivalence_group_id: Optional[str] = None,
+        equivalence_role: Optional[str] = None,
+        index_permutation: Optional[List[int]] = None,
+        binding_valid: bool = False,
+        anima_task_type: Optional[str] = None,
+        slot_presence: Optional[List[bool]] = None,
     ) -> None:
         self.image_key: str = image_key
         self.num_repeats: int = num_repeats
@@ -211,6 +217,82 @@ class ImageInfo:
             )
         self.negative_image_paths: List[str] = negative_image_paths or []
         self.class_reference_image_paths: List[str] = class_reference_image_paths or []
+        self.equivalence_group_id: Optional[str] = equivalence_group_id
+        self.equivalence_role: Optional[str] = equivalence_role
+        self.index_permutation: Optional[List[int]] = (
+            [int(value) for value in index_permutation]
+            if index_permutation is not None
+            else None
+        )
+        self.binding_valid: bool = bool(binding_valid)
+        self.anima_task_type: Optional[str] = (
+            str(anima_task_type) if anima_task_type is not None else None
+        )
+        supported_task_types = {
+            "edit_1ref",
+            "character_1ref",
+            "dualref_2ref",
+        }
+        if (
+            self.anima_task_type is not None
+            and self.anima_task_type not in supported_task_types
+        ):
+            raise ValueError(
+                f"Unsupported anima_task_type {self.anima_task_type!r} for {absolute_path}; "
+                f"expected one of {sorted(supported_task_types)}."
+            )
+        self.slot_presence: Optional[List[bool]] = (
+            [bool(value) for value in slot_presence]
+            if slot_presence is not None
+            else None
+        )
+        if self.slot_presence is not None:
+            if len(self.slot_presence) != 2:
+                raise ValueError(
+                    f"slot_presence must contain exactly logical slots 0/1 for {absolute_path}."
+                )
+            if self.reference_slot_ids is None:
+                raise ValueError(
+                    f"slot_presence requires explicit reference_slot_ids for {absolute_path}."
+                )
+            expected_presence = [
+                slot_id in self.reference_slot_ids for slot_id in (0, 1)
+            ]
+            if self.slot_presence != expected_presence:
+                raise ValueError(
+                    f"slot_presence {self.slot_presence} disagrees with reference_slot_ids "
+                    f"{self.reference_slot_ids} for {absolute_path}."
+                )
+        if self.anima_task_type in {"edit_1ref", "character_1ref"}:
+            if len(self.reference_image_paths) != 1:
+                raise ValueError(
+                    f"{self.anima_task_type} requires exactly one physical reference for {absolute_path}."
+                )
+            if self.reference_slot_ids not in ([0], [1]):
+                raise ValueError(
+                    f"{self.anima_task_type} requires one logical slot 0 or 1 for {absolute_path}."
+                )
+        elif self.anima_task_type == "dualref_2ref":
+            if (
+                len(self.reference_image_paths) != 2
+                or self.reference_slot_ids != [0, 1]
+            ):
+                raise ValueError(
+                    f"dualref_2ref requires two ordered physical references in logical slots [0,1] "
+                    f"for {absolute_path}."
+                )
+        if self.equivalence_group_id is not None:
+            if self.equivalence_role not in ("canonical", "sync_swap"):
+                raise ValueError(
+                    f"equivalence group {self.equivalence_group_id!r} has invalid role "
+                    f"{self.equivalence_role!r} for {absolute_path}."
+                )
+            if self.index_permutation not in ([0, 1], [1, 0]):
+                raise ValueError(
+                    f"equivalence group {self.equivalence_group_id!r} requires a two-slot permutation."
+                )
+            if not self.binding_valid:
+                raise ValueError("A paired equivalence row must have binding_valid=true.")
         self.image_size: Tuple[int, int] = None
         self.resized_size: Tuple[int, int] = None
         self.bucket_reso: Tuple[int, int] = None
@@ -818,6 +900,26 @@ class BaseDataset(torch.utils.data.Dataset):
         self.text_encoder_output_caching_strategy = None
         self.latents_caching_strategy = None
 
+        # Optional V4 B1 batching.  The ordered-edit manifest materializes a
+        # SAFE task as adjacent canonical/sync-swap rows, while an AMBIGUOUS
+        # task is deliberately a single binding-invalid row.  Ordinary fixed
+        # row batching can split a SAFE pair at a boundary and also gives SAFE
+        # tasks twice the primary-flow weight.  B1 therefore batches logical
+        # *units*: one SAFE pair or one AMBIGUOUS singleton.  Singletons are
+        # duplicated only in the transport batch so every unit occupies two
+        # adjacent rows; the trainer consumes exactly one primary row and never
+        # treats the duplicate as an additional training example.
+        self._b1_equivalence_units = None
+        self._b1_effective_batch_size = None
+        # Scaled one-reference batching must keep the numeric
+        # ``dataset[index] -> physical batch`` mapping immutable.  The ordinary
+        # collator reports a new epoch only after DataLoader has already fetched
+        # the first numeric index; changing buckets at that point duplicates one
+        # batch and omits another.  This latch is set after the scaled carrier is
+        # materialized and intentionally remains true for the dataset lifetime.
+        self._v4_scaled_single_batches_frozen = False
+        self._v4_scaled_trimmed_image_keys = ()
+
     def set_current_strategies(self):
         self.tokenize_strategy = TokenizeStrategy.get_strategy()
         self.text_encoder_output_caching_strategy = TextEncoderOutputsCachingStrategy.get_strategy()
@@ -1233,8 +1335,308 @@ class BaseDataset(torch.utils.data.Dataset):
         # set random seed for this epoch
         random.seed(self.seed + self.current_epoch)
 
+        if self._b1_equivalence_units is not None or bool(
+            getattr(self, "_v4_scaled_single_batches_frozen", False)
+        ):
+            # DataLoader's collator reports the new epoch only after the first
+            # numeric sample index has already been fetched. Mutating either
+            # buckets_indices or bucket contents here would therefore make the
+            # remainder of that iterator refer to a different mapping, causing
+            # exact per-epoch omissions/duplicates. B1 freezes its unit->index
+            # mapping once; the outer DataLoader(shuffle=True) still randomizes
+            # batch order every epoch without invalidating in-flight indices.
+            return
+
         random.shuffle(self.buckets_indices)
-        self.bucket_manager.shuffle()
+        for bucket in self.bucket_manager.buckets:
+            grouped = {}
+            singles = []
+            for image_key in bucket:
+                group_id = getattr(self.image_data[image_key], "equivalence_group_id", None)
+                if group_id is None:
+                    singles.append([image_key])
+                else:
+                    grouped.setdefault(group_id, []).append(image_key)
+            if not grouped:
+                random.shuffle(bucket)
+                continue
+            units = list(singles)
+            for group_id, keys in grouped.items():
+                if len(keys) != 2:
+                    raise ValueError(
+                        f"Equivalence group {group_id!r} must occur exactly twice in its target bucket, "
+                        f"got {len(keys)} rows."
+                    )
+                roles = {
+                    getattr(self.image_data[key], "equivalence_role", None): key
+                    for key in keys
+                }
+                if set(roles) != {"canonical", "sync_swap"}:
+                    raise ValueError(
+                        f"Equivalence group {group_id!r} must contain canonical and sync_swap rows."
+                    )
+                canonical = self.image_data[roles["canonical"]]
+                swapped = self.image_data[roles["sync_swap"]]
+                if canonical.absolute_path != swapped.absolute_path:
+                    raise ValueError(
+                        f"Equivalence group {group_id!r} does not share one target path."
+                    )
+                if canonical.index_permutation != [0, 1] or swapped.index_permutation != [1, 0]:
+                    raise ValueError(
+                        f"Equivalence group {group_id!r} has an invalid N/X permutation contract."
+                    )
+                units.append([roles["canonical"], roles["sync_swap"]])
+            random.shuffle(units)
+            bucket[:] = [image_key for unit in units for image_key in unit]
+
+    def enable_b1_equivalence_unit_batching(self, effective_batch_size: int) -> None:
+        """Batch eight logical edit tasks without inventing AMBIGUOUS labels.
+
+        SAFE manifest rows remain a verified N/X pair.  AMBIGUOUS rows have no
+        equivalence id and ``binding_valid=False``.  At transport time only, an
+        AMBIGUOUS key is repeated twice so a fixed-width row slice can retain
+        pair adjacency.  The B1 objective validates the two copies and selects
+        the canonical copy exactly once for L_flow.
+        """
+
+        effective_batch_size = int(effective_batch_size)
+        if effective_batch_size <= 0:
+            raise ValueError("B1 effective batch size must be positive.")
+        units_by_bucket = []
+        seen_groups = set()
+        seen_singles = set()
+        for bucket_index, bucket in enumerate(self.bucket_manager.buckets):
+            grouped = {}
+            singles = []
+            for image_key in bucket:
+                info = self.image_data[image_key]
+                group_id = getattr(info, "equivalence_group_id", None)
+                if group_id is None:
+                    if bool(getattr(info, "binding_valid", False)):
+                        raise ValueError(
+                            f"B1 row {image_key!r} is binding-valid but has no equivalence group."
+                        )
+                    if image_key in seen_singles:
+                        raise ValueError(f"B1 AMBIGUOUS row {image_key!r} occurs more than once.")
+                    seen_singles.add(image_key)
+                    singles.append((image_key,))
+                else:
+                    grouped.setdefault(group_id, []).append(image_key)
+            units = list(singles)
+            for group_id, keys in grouped.items():
+                if group_id in seen_groups:
+                    raise ValueError(f"B1 equivalence group {group_id!r} spans multiple buckets.")
+                seen_groups.add(group_id)
+                if len(keys) != 2:
+                    raise ValueError(
+                        f"B1 SAFE equivalence group {group_id!r} must occur exactly twice, got {len(keys)}."
+                    )
+                roles = {getattr(self.image_data[key], "equivalence_role", None): key for key in keys}
+                if set(roles) != {"canonical", "sync_swap"}:
+                    raise ValueError(
+                        f"B1 SAFE equivalence group {group_id!r} must contain canonical/sync_swap rows."
+                    )
+                canonical = self.image_data[roles["canonical"]]
+                swapped = self.image_data[roles["sync_swap"]]
+                if not bool(canonical.binding_valid) or not bool(swapped.binding_valid):
+                    raise ValueError(f"B1 SAFE equivalence group {group_id!r} is not binding-valid.")
+                if canonical.absolute_path != swapped.absolute_path:
+                    raise ValueError(f"B1 SAFE equivalence group {group_id!r} does not share one target.")
+                if canonical.index_permutation != [0, 1] or swapped.index_permutation != [1, 0]:
+                    raise ValueError(f"B1 SAFE equivalence group {group_id!r} has invalid permutations.")
+                if list(swapped.reference_image_paths) != list(canonical.reference_image_paths)[::-1]:
+                    raise ValueError(f"B1 SAFE equivalence group {group_id!r} is not a physical sync swap.")
+                units.append((roles["canonical"], roles["sync_swap"]))
+            units_by_bucket.append(tuple(units))
+        if not any(units_by_bucket):
+            raise ValueError("B1 equivalence-unit batching found no trainable units.")
+        self._b1_equivalence_units = tuple(units_by_bucket)
+        self._b1_effective_batch_size = effective_batch_size
+        # The public batch_size now describes the fixed transport width.  The
+        # optimizer's effective primary-flow batch remains the requested unit
+        # count and is reported separately by the trainer.
+        self.batch_size = effective_batch_size * 2
+        self._shuffle_b1_equivalence_unit_buckets()
+
+    def enable_v4_scaled_mixture_batching(self, effective_batch_size: int) -> str:
+        """Validate one task-homogeneous dataset and configure its carrier.
+
+        A :class:`DatasetGroup` may concatenate the three scaled-training
+        datasets, but an individual dataset item is already a complete physical
+        batch.  Therefore every underlying dataset must contain exactly one task
+        type.  Single-reference datasets keep the ordinary ``B``-row carrier;
+        only ``dualref_2ref`` keeps B1's verified two-row equivalence transport.
+
+        Keeping this separation at the dataset boundary prevents a batch from
+        silently mixing one- and two-reference samples, and avoids padding a
+        single physical reference with a duplicated/fabricated second image.
+        """
+
+        effective_batch_size = int(effective_batch_size)
+        if effective_batch_size <= 0:
+            raise ValueError("V4 scaled effective batch size must be positive.")
+        task_types = {
+            getattr(info, "anima_task_type", None)
+            for info in self.image_data.values()
+        }
+        if None in task_types:
+            raise ValueError(
+                "V4 scaled training requires anima_task_type on every manifest row."
+            )
+        if len(task_types) != 1:
+            raise ValueError(
+                "V4 scaled training requires each underlying dataset to be task-homogeneous; "
+                f"found {sorted(task_types)}. Put edit_1ref, character_1ref, and "
+                "dualref_2ref in separate dataset entries."
+            )
+        task_type = next(iter(task_types))
+        for info in self.image_data.values():
+            paths = list(getattr(info, "reference_image_paths", ()))
+            slots = list(getattr(info, "reference_slot_ids", ()) or ())
+            presence = getattr(info, "slot_presence", None)
+            if task_type in {"edit_1ref", "character_1ref"}:
+                if len(paths) != 1 or slots != [0]:
+                    raise ValueError(
+                        f"{task_type} manifests must be canonical one-reference rows in slot0; "
+                        "the trainer performs deterministic 50/50 slot placement online."
+                    )
+                if presence != [True, False]:
+                    raise ValueError(
+                        f"{task_type} canonical manifests require slot_presence=[true,false]."
+                    )
+                if getattr(info, "equivalence_group_id", None) is not None:
+                    raise ValueError(
+                        f"{task_type} rows cannot carry B1 N/X equivalence metadata."
+                    )
+            elif task_type == "dualref_2ref":
+                if len(paths) != 2 or slots != [0, 1] or presence != [True, True]:
+                    raise ValueError(
+                        "dualref_2ref rows require two physical references, logical slots [0,1], "
+                        "and slot_presence=[true,true]."
+                    )
+            else:  # ImageInfo validates this earlier; retain a fail-closed boundary.
+                raise ValueError(f"Unsupported V4 scaled task type: {task_type!r}.")
+
+        if task_type == "dualref_2ref":
+            self.enable_b1_equivalence_unit_batching(effective_batch_size)
+        elif int(self.batch_size) != effective_batch_size:
+            raise ValueError(
+                f"{task_type} physical batch size is {self.batch_size}, expected "
+                f"{effective_batch_size}; no transport duplication is permitted."
+            )
+        else:
+            # Exact 50/50 placement needs an even physical row count in every
+            # emitted batch.  A bucket remainder can be odd; drop at most one
+            # real row from that bucket rather than duplicating a target or
+            # fabricating a second reference.  The omission is explicit and
+            # bounded by the number of aspect-ratio buckets.
+            dropped_keys = []
+            for bucket in self.bucket_manager.buckets:
+                if len(bucket) % effective_batch_size % 2:
+                    dropped_keys.append(bucket.pop())
+            self.buckets_indices = []
+            for bucket_index, bucket in enumerate(self.bucket_manager.buckets):
+                batch_count = int(math.ceil(len(bucket) / effective_batch_size))
+                for batch_index in range(batch_count):
+                    self.buckets_indices.append(
+                        BucketBatchIndex(
+                            bucket_index, effective_batch_size, batch_index
+                        )
+                    )
+            self._length = len(self.buckets_indices)
+            self._v4_scaled_single_batches_frozen = True
+            self._v4_scaled_trimmed_image_keys = tuple(dropped_keys)
+            if dropped_keys:
+                logger.warning(
+                    "V4 scaled %s dropped %d odd bucket-tail row(s) to preserve exact "
+                    "50/50 logical-slot placement without duplication. The immutable "
+                    "trimmed sample-key list is included in the scaled schedule contract.",
+                    task_type,
+                    len(dropped_keys),
+                )
+        return task_type
+
+    def get_v4_scaled_numeric_mapping_identity(self) -> tuple[tuple[str, ...], ...]:
+        """Return the immutable sample-key membership of every numeric item."""
+
+        mapping = []
+        for spec in self.buckets_indices:
+            bucket = self.bucket_manager.buckets[spec.bucket_index]
+            start = spec.batch_index * spec.bucket_batch_size
+            keys = bucket[start : start + spec.bucket_batch_size]
+            if not keys:
+                raise RuntimeError(
+                    "V4 scaled numeric mapping contains an empty physical batch."
+                )
+            row_digests = []
+            for key in keys:
+                info = self.image_data[key]
+                identity = {
+                    "image_key": str(key),
+                    "target_path": str(getattr(info, "absolute_path", "")),
+                    "caption": getattr(info, "caption", None),
+                    "reference_image_paths": [
+                        str(value)
+                        for value in (
+                            getattr(info, "reference_image_paths", None) or ()
+                        )
+                    ],
+                    "reference_slot_ids": list(
+                        getattr(info, "reference_slot_ids", None) or ()
+                    ),
+                    "slot_presence": list(
+                        getattr(info, "slot_presence", None) or ()
+                    ),
+                    "anima_task_type": getattr(info, "anima_task_type", None),
+                    "equivalence_group_id": getattr(
+                        info, "equivalence_group_id", None
+                    ),
+                    "equivalence_role": getattr(info, "equivalence_role", None),
+                    "index_permutation": getattr(
+                        info, "index_permutation", None
+                    ),
+                    "binding_valid": bool(
+                        getattr(info, "binding_valid", False)
+                    ),
+                }
+                row_digests.append(
+                    hashlib.sha256(
+                        json.dumps(
+                            identity,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode("utf-8")
+                    ).hexdigest()
+                )
+            mapping.append(tuple(row_digests))
+        if len(mapping) != len(self):
+            raise RuntimeError(
+                "V4 scaled numeric mapping identity disagrees with dataset length."
+            )
+        return tuple(mapping)
+
+    def _shuffle_b1_equivalence_unit_buckets(self) -> None:
+        if self._b1_equivalence_units is None or self._b1_effective_batch_size is None:
+            raise RuntimeError("B1 equivalence-unit batching is not initialized.")
+        random.seed(self.seed + self.current_epoch)
+        self.buckets_indices = []
+        transport_batch_size = int(self._b1_effective_batch_size) * 2
+        for bucket_index, frozen_units in enumerate(self._b1_equivalence_units):
+            units = list(frozen_units)
+            random.shuffle(units)
+            # AMBIGUOUS duplication is transport padding only.  It retains the
+            # original binding_valid=False metadata and is consumed once.
+            flattened = []
+            for unit in units:
+                flattened.extend(unit if len(unit) == 2 else (unit[0], unit[0]))
+            self.bucket_manager.buckets[bucket_index][:] = flattened
+            batch_count = int(math.ceil(len(units) / self._b1_effective_batch_size))
+            for batch_index in range(batch_count):
+                self.buckets_indices.append(
+                    BucketBatchIndex(bucket_index, transport_batch_size, batch_index)
+                )
+        random.shuffle(self.buckets_indices)
+        self._length = len(self.buckets_indices)
 
     def verify_bucket_reso_steps(self, min_steps: int):
         assert self.bucket_reso_steps is None or self.bucket_reso_steps % min_steps == 0, (
@@ -1983,6 +2385,28 @@ class BaseDataset(torch.utils.data.Dataset):
             self.select_reference_slot_ids(self.image_data[image_key], selected_paths)
             for image_key, selected_paths in zip(included_image_keys, selected_reference_image_paths)
         ]
+        example["anima_task_type"] = [
+            getattr(self.image_data[image_key], "anima_task_type", None)
+            for image_key in included_image_keys
+        ]
+        example["slot_presence"] = [
+            (
+                list(self.image_data[image_key].slot_presence)
+                if getattr(self.image_data[image_key], "slot_presence", None) is not None
+                else None
+            )
+            for image_key in included_image_keys
+        ]
+        for pair_key in (
+            "equivalence_group_id",
+            "equivalence_role",
+            "index_permutation",
+            "binding_valid",
+        ):
+            example[pair_key] = [
+                getattr(self.image_data[image_key], pair_key)
+                for image_key in included_image_keys
+            ]
         cached_reference_latents = [
             self.image_data[image_key].get_cached_reference_latents(selected_paths)
             for image_key, selected_paths in zip(included_image_keys, selected_reference_image_paths)
@@ -2753,6 +3177,17 @@ class FineTuningDataset(BaseDataset):
                                     "reference_image_paths": reference_paths,
                                     "reference_slot_ids": slot_ids,
                                 }
+                                for task_key in ("anima_task_type", "slot_presence"):
+                                    if task_key in line_md:
+                                        image_md[task_key] = line_md[task_key]
+                                for pair_key in (
+                                    "equivalence_group_id",
+                                    "equivalence_role",
+                                    "index_permutation",
+                                    "binding_valid",
+                                ):
+                                    if pair_key in line_md:
+                                        image_md[pair_key] = line_md[pair_key]
                                 if "target_size" in line_md:
                                     image_md["image_size"] = line_md["target_size"]
                                 elif "image_size" in line_md:
@@ -2935,6 +3370,12 @@ class FineTuningDataset(BaseDataset):
                     reference_image_sizes=reference_image_sizes,
                     reference_slot_ids=reference_slot_ids,
                     negative_image_paths=negative_image_paths,
+                    equivalence_group_id=img_md.get("equivalence_group_id"),
+                    equivalence_role=img_md.get("equivalence_role"),
+                    index_permutation=img_md.get("index_permutation"),
+                    binding_valid=img_md.get("binding_valid", False),
+                    anima_task_type=img_md.get("anima_task_type"),
+                    slot_presence=img_md.get("slot_presence"),
                 )
                 image_info.resize_interpolation = (
                     subset.resize_interpolation if subset.resize_interpolation is not None else self.resize_interpolation
@@ -3197,6 +3638,26 @@ class ControlNetDataset(BaseDataset):
 
 # behave as Dataset mock
 class DatasetGroup(torch.utils.data.ConcatDataset):
+    V4_SCALED_TASK_WEIGHTS = {
+        "edit_1ref": 5,
+        "character_1ref": 3,
+        "dualref_2ref": 2,
+    }
+    # One ten-step cycle is exactly 50/30/20 while avoiding long contiguous
+    # runs of any task.  Child items are already complete physical batches.
+    V4_SCALED_TASK_PATTERN = (
+        "edit_1ref",
+        "character_1ref",
+        "dualref_2ref",
+        "edit_1ref",
+        "character_1ref",
+        "edit_1ref",
+        "dualref_2ref",
+        "edit_1ref",
+        "character_1ref",
+        "edit_1ref",
+    )
+
     def __init__(self, datasets: Sequence[Union[DreamBoothDataset, FineTuningDataset]]):
         self.datasets: List[Union[DreamBoothDataset, FineTuningDataset]]
 
@@ -3213,6 +3674,27 @@ class DatasetGroup(torch.utils.data.ConcatDataset):
             self.image_data.update(dataset.image_data)
             self.num_train_images += dataset.num_train_images
             self.num_reg_images += dataset.num_reg_images
+        self._v4_scaled_schedule = None
+        self._v4_scaled_schedule_contract = None
+        self.static_resume_stable_order = False
+
+    def __len__(self):
+        if self._v4_scaled_schedule is not None:
+            return len(self._v4_scaled_schedule)
+        return super().__len__()
+
+    def __getitem__(self, index):
+        if self._v4_scaled_schedule is None:
+            return super().__getitem__(index)
+        if index < 0:
+            index += len(self._v4_scaled_schedule)
+        if index < 0 or index >= len(self._v4_scaled_schedule):
+            raise IndexError(
+                f"V4 scaled schedule index {index} is outside "
+                f"[0,{len(self._v4_scaled_schedule)})."
+            )
+        dataset_index, child_index = self._v4_scaled_schedule[index]
+        return self.datasets[dataset_index][child_index]
 
     def add_replacement(self, str_from, str_to):
         for dataset in self.datasets:
@@ -3286,6 +3768,186 @@ class DatasetGroup(torch.utils.data.ConcatDataset):
     def set_current_strategies(self):
         for dataset in self.datasets:
             dataset.set_current_strategies()
+
+    def enable_b1_equivalence_unit_batching(self, effective_batch_size: int) -> None:
+        for dataset in self.datasets:
+            if not hasattr(dataset, "enable_b1_equivalence_unit_batching"):
+                raise TypeError(
+                    f"Dataset {type(dataset).__name__} does not support V4 B1 equivalence-unit batching."
+                )
+            dataset.enable_b1_equivalence_unit_batching(effective_batch_size)
+        # ConcatDataset snapshots child lengths in __init__. B1 rebuilding
+        # changes them from row batches to logical-unit batches.
+        self.cumulative_sizes = self.cumsum(self.datasets)
+
+    def enable_v4_scaled_mixture_batching(self, effective_batch_size: int) -> tuple[str, ...]:
+        task_types = []
+        for dataset in self.datasets:
+            if not hasattr(dataset, "enable_v4_scaled_mixture_batching"):
+                raise TypeError(
+                    f"Dataset {type(dataset).__name__} does not support V4 scaled task batching."
+                )
+            task_types.append(
+                dataset.enable_v4_scaled_mixture_batching(effective_batch_size)
+            )
+        missing = {
+            "edit_1ref",
+            "character_1ref",
+            "dualref_2ref",
+        } - set(task_types)
+        if missing:
+            raise ValueError(
+                "V4 scaled training requires all three task datasets; missing "
+                f"{sorted(missing)}."
+            )
+        self.cumulative_sizes = self.cumsum(self.datasets)
+        sources = {task: [] for task in self.V4_SCALED_TASK_WEIGHTS}
+        source_mapping_payload = []
+        for dataset_index, (dataset, task_type) in enumerate(
+            zip(self.datasets, task_types, strict=True)
+        ):
+            if not hasattr(dataset, "get_v4_scaled_numeric_mapping_identity"):
+                raise TypeError(
+                    f"V4 scaled dataset {dataset_index} cannot expose immutable "
+                    "numeric sample membership for exact resume."
+                )
+            numeric_mapping = dataset.get_v4_scaled_numeric_mapping_identity()
+            if len(numeric_mapping) != len(dataset):
+                raise RuntimeError(
+                    f"V4 scaled dataset {dataset_index} mapping length changed."
+                )
+            sources[task_type].extend(
+                (dataset_index, child_index) for child_index in range(len(dataset))
+            )
+            source_mapping_payload.append(
+                {
+                    "dataset_index": dataset_index,
+                    "task_type": task_type,
+                    "numeric_batches": [list(keys) for keys in numeric_mapping],
+                }
+            )
+        empty = sorted(task for task, items in sources.items() if not items)
+        if empty:
+            raise ValueError(
+                f"V4 scaled task datasets emitted no physical batches: {empty}."
+            )
+
+        # A balanced epoch is the smallest whole number of 5/3/2 cycles which
+        # covers every underlying physical batch at least once.  Smaller tasks
+        # are repeated at the *complete batch* level; num_repeats and B1's
+        # equivalence-group transport are never modified.
+        cycle_count = max(
+            int(math.ceil(len(sources[task]) / weight))
+            for task, weight in self.V4_SCALED_TASK_WEIGHTS.items()
+        )
+        scheduled_counts = {
+            task: cycle_count * weight
+            for task, weight in self.V4_SCALED_TASK_WEIGHTS.items()
+        }
+        seed_material = "|".join(
+            f"{index}:{int(getattr(dataset, 'seed', 0))}:{task_types[index]}:{len(dataset)}"
+            for index, dataset in enumerate(self.datasets)
+        )
+        schedule_seed = int.from_bytes(
+            hashlib.sha256(seed_material.encode("utf-8")).digest()[:8], "big"
+        )
+        expanded = {}
+        for task, items in sources.items():
+            ordered = list(items)
+            random.Random(schedule_seed ^ int.from_bytes(task.encode("utf-8"), "little")).shuffle(
+                ordered
+            )
+            quota = scheduled_counts[task]
+            expanded[task] = [
+                ordered[index % len(ordered)] for index in range(quota)
+            ]
+            if set(ordered) - set(expanded[task]):
+                raise RuntimeError(
+                    f"V4 scaled schedule failed exact source coverage for {task}."
+                )
+        cursors = {task: 0 for task in sources}
+        schedule = []
+        for _cycle in range(cycle_count):
+            for task in self.V4_SCALED_TASK_PATTERN:
+                schedule.append(expanded[task][cursors[task]])
+                cursors[task] += 1
+        if any(cursors[task] != scheduled_counts[task] for task in cursors):
+            raise RuntimeError("V4 scaled task pattern does not match its frozen weights.")
+
+        schedule_payload = [[int(a), int(b)] for a, b in schedule]
+        schedule_sha256 = hashlib.sha256(
+            json.dumps(schedule_payload, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        source_mapping_sha256 = hashlib.sha256(
+            json.dumps(
+                source_mapping_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        trimmed = []
+        for dataset_index, (dataset, task_type) in enumerate(
+            zip(self.datasets, task_types, strict=True)
+        ):
+            keys = [
+                str(value)
+                for value in getattr(dataset, "_v4_scaled_trimmed_image_keys", ())
+            ]
+            trimmed.append(
+                {
+                    "dataset_index": dataset_index,
+                    "task_type": task_type,
+                    "count": len(keys),
+                    "keys_sha256": hashlib.sha256(
+                        json.dumps(keys, separators=(",", ":")).encode("utf-8")
+                    ).hexdigest(),
+                }
+            )
+        self._v4_scaled_schedule = tuple(tuple(item) for item in schedule_payload)
+        self._v4_scaled_schedule_contract = {
+            "version": "anima-v4-scaled-task-schedule/v1",
+            "task_weights": dict(self.V4_SCALED_TASK_WEIGHTS),
+            "task_pattern": list(self.V4_SCALED_TASK_PATTERN),
+            "source_batch_counts": {
+                task: len(items) for task, items in sources.items()
+            },
+            "scheduled_batch_counts": scheduled_counts,
+            "cycle_count": cycle_count,
+            "schedule_length": len(schedule),
+            "schedule_sha256": schedule_sha256,
+            "source_mapping_sha256": source_mapping_sha256,
+            "trimmed_odd_tail": trimmed,
+            "static_resume_stable_order": True,
+        }
+        # train_network.py observes this flag and uses SequentialSampler.  Since
+        # both the group schedule and every child numeric mapping are immutable,
+        # (global_step % schedule_length) reconstructs the exact task/sample
+        # cursor after a mid-epoch resume.
+        self.static_resume_stable_order = True
+        logger.info(
+            "V4 scaled deterministic schedule: source=%s, scheduled=%s, "
+            "cycles=%d, steps=%d, schedule_sha256=%s, source_mapping_sha256=%s",
+            self._v4_scaled_schedule_contract["source_batch_counts"],
+            scheduled_counts,
+            cycle_count,
+            len(schedule),
+            schedule_sha256,
+            source_mapping_sha256,
+        )
+        return tuple(task_types)
+
+    def get_v4_scaled_schedule_contract(self) -> dict:
+        if self._v4_scaled_schedule_contract is None:
+            raise RuntimeError("V4 scaled task schedule is not initialized.")
+        # Return a detached JSON-shaped copy so a trainer/test cannot mutate the
+        # dataset's resume identity in place.
+        return json.loads(
+            json.dumps(
+                self._v4_scaled_schedule_contract,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
 
     def set_current_epoch(self, epoch):
         for dataset in self.datasets:

@@ -1,7 +1,8 @@
-"""ComfyUI nodes for Anima Native Reference V2 E180.
+"""ComfyUI nodes for legacy V2 E180 and final competitive-router V4.
 
 The package exports the classic/V1 ComfyUI registration dictionaries for the
-broadest compatibility.  Model weights are never loaded during import.
+broadest compatibility.  Existing V2 class IDs are intentionally retained.
+Model weights are never loaded during import.
 """
 
 if __package__:

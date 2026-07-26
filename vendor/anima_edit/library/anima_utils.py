@@ -1,6 +1,8 @@
 # Anima model loading/saving utilities
 
 import json
+import hashlib
+import math
 import os
 from typing import Any, Dict, List, Optional, Union
 import torch
@@ -51,6 +53,24 @@ ANIMA_NATIVE_REFERENCE_STATE_KEYS = (
     "reference_type_embedding",
 )
 ANIMA_NATIVE_REFERENCE_STATE_MARKER = ".native_reference_attn."
+ANIMA_NATIVE_REFERENCE_TEXT_SLOT_ROUTER_STATE_MARKER = ".native_reference_attn.clause_pooler."
+ANIMA_NATIVE_REFERENCE_ROUTING_MODES = ("legacy", "competitive_text_slot_v1")
+ANIMA_NATIVE_REFERENCE_ROUTING_MODE_METADATA_KEY = "anima_native_reference_routing_mode"
+ANIMA_NATIVE_REFERENCE_ROUTING_ALPHA_METADATA_KEY = "anima_native_reference_routing_alpha"
+ANIMA_NATIVE_REFERENCE_ROUTER_TEMPERATURE_METADATA_KEY = "anima_native_reference_router_temperature"
+ANIMA_NATIVE_REFERENCE_ROUTER_NULL_ENABLED_METADATA_KEY = "anima_native_reference_router_null_enabled"
+ANIMA_NATIVE_REFERENCE_ROUTER_CONFIG_METADATA_KEY = "anima_native_reference_router_config"
+_ANIMA_NATIVE_REFERENCE_ROUTING_CONFIG_KEYS = (
+    "routing_mode",
+    "routing_alpha",
+    "router_temperature",
+    "router_null_enabled",
+)
+_ANIMA_NATIVE_REFERENCE_ROUTING_REQUIRED_CONFIG_KEYS = (
+    "routing_mode",
+    "routing_alpha",
+    "router_temperature",
+)
 
 
 def _normalise_anima_state_key(key: str) -> str:
@@ -62,6 +82,78 @@ def is_native_reference_state_key(key: str) -> bool:
 
     key = _normalise_anima_state_key(key)
     return key in ANIMA_NATIVE_REFERENCE_STATE_KEYS or ANIMA_NATIVE_REFERENCE_STATE_MARKER in key
+
+
+def tensor_raw_sha256(tensor: torch.Tensor) -> str:
+    """Hash shape, dtype, and exact storage bytes without NumPy dtype coercion."""
+
+    value = tensor.detach().to(device="cpu").contiguous()
+    header = json.dumps(
+        {"shape": list(value.shape), "dtype": str(value.dtype)},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    raw = value.reshape(-1).view(torch.uint8).numpy().tobytes()
+    digest = hashlib.sha256()
+    digest.update(header)
+    digest.update(b"\0")
+    digest.update(raw)
+    return digest.hexdigest()
+
+
+def assert_non_native_state_bitwise_equal(
+    source_state: Dict[str, torch.Tensor],
+    candidate_state: Dict[str, torch.Tensor],
+) -> Dict[str, str]:
+    """Fail unless every non-native checkpoint tensor is byte-identical.
+
+    The narrow :func:`is_native_reference_state_key` predicate is the sole
+    allowlist.  Shape and dtype are compared separately because
+    ``torch.equal`` considers some equal-valued tensors with different dtypes
+    equal, which is not a publish-safe frozen-base contract.
+    """
+
+    source_keys = set(source_state)
+    candidate_keys = set(candidate_state)
+    if source_keys != candidate_keys:
+        raise ValueError(
+            "Checkpoint key sets differ: "
+            f"missing={sorted(source_keys - candidate_keys)[:8]}, "
+            f"unexpected={sorted(candidate_keys - source_keys)[:8]}."
+        )
+    digests = {}
+    for key in sorted(source_keys):
+        if is_native_reference_state_key(key):
+            continue
+        source = source_state[key]
+        candidate = candidate_state[key]
+        if source.shape != candidate.shape or source.dtype != candidate.dtype:
+            raise ValueError(
+                f"Frozen non-native tensor metadata changed for {key}: "
+                f"{tuple(source.shape)}/{source.dtype} != "
+                f"{tuple(candidate.shape)}/{candidate.dtype}."
+            )
+        source_digest = tensor_raw_sha256(source)
+        candidate_digest = tensor_raw_sha256(candidate)
+        if source_digest != candidate_digest:
+            raise ValueError(
+                f"Frozen non-native tensor bytes changed for {key}: "
+                f"{source_digest} != {candidate_digest}."
+            )
+        digests[key] = source_digest
+    return digests
+
+
+def is_native_reference_text_slot_router_state_key(key: str) -> bool:
+    """Return whether *key* is a V4 text-slot router parameter/buffer.
+
+    This deliberately uses the narrow clause-pooler marker from the published
+    checkpoint contract instead of treating every native-reference key as V4.
+    Published V1/V2 checkpoints contain ``native_reference_attn`` keys too and
+    must continue to load through the exact legacy graph.
+    """
+
+    return ANIMA_NATIVE_REFERENCE_TEXT_SLOT_ROUTER_STATE_MARKER in _normalise_anima_state_key(key)
 
 
 def _as_checkpoint_file_list(model_files: Union[str, List[str]]) -> List[str]:
@@ -78,16 +170,101 @@ def _metadata_bool(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _parse_metadata_dict(raw_value: Any, metadata_key: str) -> Dict[str, Any]:
+    if not raw_value:
+        return {}
+    try:
+        parsed = json.loads(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid {metadata_key} metadata: {raw_value!r}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Invalid {metadata_key} metadata: expected a JSON object, got {raw_value!r}")
+    return parsed
+
+
+def _validate_native_reference_routing_mode(value: Any, *, source: str) -> str:
+    mode = str(value)
+    if mode not in ANIMA_NATIVE_REFERENCE_ROUTING_MODES:
+        raise ValueError(
+            f"Invalid native reference routing mode from {source}: {mode!r}; "
+            f"expected one of {ANIMA_NATIVE_REFERENCE_ROUTING_MODES}."
+        )
+    return mode
+
+
+def _validate_native_reference_routing_float(
+    value: Any,
+    *,
+    name: str,
+    source: str,
+) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Invalid native reference {name} from {source}: {value!r}") from exc
+    if not math.isfinite(parsed):
+        raise ValueError(f"Invalid native reference {name} from {source}: expected a finite value, got {value!r}")
+    if name == "routing_alpha" and not 0.0 <= parsed <= 1.0:
+        raise ValueError(f"Invalid native reference routing_alpha from {source}: expected [0, 1], got {parsed!r}")
+    if name == "router_temperature" and parsed <= 0.0:
+        raise ValueError(
+            f"Invalid native reference router_temperature from {source}: expected a positive value, got {parsed!r}"
+        )
+    return parsed
+
+
+def _validate_native_reference_routing_bool(value: Any, *, name: str, source: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalised = str(value).strip().lower()
+    if normalised in {"1", "true", "yes", "on"}:
+        return True
+    if normalised in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"Invalid native reference {name} from {source}: expected a boolean, got {value!r}")
+
+
+def _normalise_native_reference_routing_config(config: Dict[str, Any], *, source: str) -> Dict[str, Any]:
+    missing = [key for key in _ANIMA_NATIVE_REFERENCE_ROUTING_REQUIRED_CONFIG_KEYS if key not in config]
+    if missing:
+        raise ValueError(f"Incomplete native reference routing config from {source}: missing={missing}")
+    return {
+        "routing_mode": _validate_native_reference_routing_mode(config["routing_mode"], source=source),
+        "routing_alpha": _validate_native_reference_routing_float(
+            config["routing_alpha"], name="routing_alpha", source=source
+        ),
+        "router_temperature": _validate_native_reference_routing_float(
+            config["router_temperature"], name="router_temperature", source=source
+        ),
+        # V4 checkpoints written before the structural-smoke hardening did not
+        # persist this runtime-only switch and therefore historically evaluated
+        # with the model default (enabled).  Keep those files loadable while all
+        # new saves duplicate the field in every routing metadata source.
+        "router_null_enabled": _validate_native_reference_routing_bool(
+            config.get("router_null_enabled", True),
+            name="router_null_enabled",
+            source=source,
+        ),
+    }
+
+
+def _routing_configs_equal(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+    return all(left[key] == right[key] for key in _ANIMA_NATIVE_REFERENCE_ROUTING_CONFIG_KEYS)
+
+
 def inspect_anima_checkpoint(model_files: Union[str, List[str]]) -> Dict[str, Any]:
     """Inspect Anima checkpoint structure without loading its large tensors.
 
-    The state keys are authoritative; metadata is an explicit, human-readable
-    description used to round-trip the architecture configuration.  Old base
-    checkpoints have neither and therefore remain native-reference disabled.
+    V1/V2 native-reference checkpoints predate text-slot routing metadata and
+    are valid legacy checkpoints.  A V4 checkpoint is different: the narrow
+    clause-pooler state marker and all duplicated routing metadata must agree.
+    This fail-closed rule prevents silently loading trained router tensors into
+    a legacy graph (or constructing an untrained router for a mislabeled file).
     """
 
     metadata: Dict[str, str] = {}
     native_keys: List[str] = []
+    text_slot_router_keys: List[str] = []
     slot_rows: Optional[int] = None
     state_architecture: Optional[str] = None
     state_rank: Optional[int] = None
@@ -103,6 +280,8 @@ def inspect_anima_checkpoint(model_files: Union[str, List[str]]) -> Dict[str, An
                 key = _normalise_anima_state_key(raw_key)
                 if is_native_reference_state_key(key):
                     native_keys.append(key)
+                if is_native_reference_text_slot_router_state_key(key):
+                    text_slot_router_keys.append(key)
                 if key == "reference_slot_embeddings.weight":
                     slot_rows = int(handle.get_slice(raw_key).get_shape()[0])
                 if key.endswith(".native_reference_attn.k_down.weight"):
@@ -117,22 +296,16 @@ def inspect_anima_checkpoint(model_files: Union[str, List[str]]) -> Dict[str, An
                 if key.endswith(".native_reference_attn.target_spatial.weight"):
                     state_spatial_rows = int(handle.get_slice(raw_key).get_shape()[0])
 
-    config: Dict[str, Any] = {}
     raw_config = metadata.get(ANIMA_NATIVE_REFERENCE_CONFIG_METADATA_KEY)
-    if raw_config:
-        try:
-            parsed = json.loads(raw_config)
-            if isinstance(parsed, dict):
-                config.update(parsed)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"Invalid {ANIMA_NATIVE_REFERENCE_CONFIG_METADATA_KEY} metadata: {raw_config!r}") from exc
+    metadata_native_config = _parse_metadata_dict(raw_config, ANIMA_NATIVE_REFERENCE_CONFIG_METADATA_KEY)
+    config: Dict[str, Any] = dict(metadata_native_config)
 
     metadata_enabled = _metadata_bool(metadata.get(ANIMA_NATIVE_REFERENCE_METADATA_KEY, False))
     enabled = bool(native_keys) or metadata_enabled
     if slot_rows is not None:
         config["max_reference_images"] = slot_rows
     if state_architecture is not None:
-        # Tensor layout is authoritative when metadata is absent or stale.
+        # Tensor layout remains authoritative for historical V1/V2 metadata.
         config["architecture"] = state_architecture
     if state_rank is not None:
         config["rank"] = state_rank
@@ -148,6 +321,97 @@ def inspect_anima_checkpoint(model_files: Union[str, List[str]]) -> Dict[str, An
     config.setdefault("initial_gate", 0.5 if config["architecture"] == "v2" else 0.01)
     detected_version = 2 if config["architecture"] == "v2" else ANIMA_NATIVE_REFERENCE_VERSION
 
+    native_routing_fields = {
+        key: metadata_native_config[key]
+        for key in _ANIMA_NATIVE_REFERENCE_ROUTING_CONFIG_KEYS
+        if key in metadata_native_config
+    }
+    top_level_routing_fields = {}
+    top_level_metadata_keys = {
+        "routing_mode": ANIMA_NATIVE_REFERENCE_ROUTING_MODE_METADATA_KEY,
+        "routing_alpha": ANIMA_NATIVE_REFERENCE_ROUTING_ALPHA_METADATA_KEY,
+        "router_temperature": ANIMA_NATIVE_REFERENCE_ROUTER_TEMPERATURE_METADATA_KEY,
+        "router_null_enabled": ANIMA_NATIVE_REFERENCE_ROUTER_NULL_ENABLED_METADATA_KEY,
+    }
+    for config_key, metadata_key in top_level_metadata_keys.items():
+        if metadata_key in metadata:
+            top_level_routing_fields[config_key] = metadata[metadata_key]
+
+    router_config_metadata_present = ANIMA_NATIVE_REFERENCE_ROUTER_CONFIG_METADATA_KEY in metadata
+    router_config_metadata = (
+        _parse_metadata_dict(
+            metadata.get(ANIMA_NATIVE_REFERENCE_ROUTER_CONFIG_METADATA_KEY),
+            ANIMA_NATIVE_REFERENCE_ROUTER_CONFIG_METADATA_KEY,
+        )
+        if router_config_metadata_present
+        else {}
+    )
+
+    routing_sources: List[tuple[str, Dict[str, Any]]] = []
+    if native_routing_fields:
+        routing_sources.append((ANIMA_NATIVE_REFERENCE_CONFIG_METADATA_KEY, native_routing_fields))
+    if top_level_routing_fields:
+        routing_sources.append(("top-level routing metadata", top_level_routing_fields))
+    if router_config_metadata_present:
+        routing_sources.append((ANIMA_NATIVE_REFERENCE_ROUTER_CONFIG_METADATA_KEY, router_config_metadata))
+
+    normalised_routing_sources = [
+        (source, _normalise_native_reference_routing_config(source_config, source=source))
+        for source, source_config in routing_sources
+    ]
+    has_text_slot_router_state = bool(text_slot_router_keys)
+    if has_text_slot_router_state or normalised_routing_sources:
+        present_sources = {source for source, _ in normalised_routing_sources}
+        required_sources = {
+            ANIMA_NATIVE_REFERENCE_CONFIG_METADATA_KEY,
+            "top-level routing metadata",
+            ANIMA_NATIVE_REFERENCE_ROUTER_CONFIG_METADATA_KEY,
+        }
+        missing_sources = sorted(required_sources - present_sources)
+        if missing_sources:
+            raise ValueError(
+                "Incomplete native reference routing metadata: "
+                f"missing complete source(s) {missing_sources}; V4 checkpoints fail closed."
+            )
+
+        routing_config = normalised_routing_sources[0][1]
+        for source, candidate in normalised_routing_sources[1:]:
+            if not _routing_configs_equal(routing_config, candidate):
+                raise ValueError(
+                    "Inconsistent native reference routing metadata: "
+                    f"{normalised_routing_sources[0][0]}={routing_config!r}, {source}={candidate!r}."
+                )
+
+        if has_text_slot_router_state:
+            if routing_config["routing_mode"] != "competitive_text_slot_v1":
+                raise ValueError(
+                    "Checkpoint contains V4 text-slot router keys but metadata routing_mode is not "
+                    "'competitive_text_slot_v1'."
+                )
+            if metadata_native_config.get("architecture") != "v2":
+                raise ValueError(
+                    "V4 text-slot router checkpoint metadata must explicitly declare native-reference architecture='v2'."
+                )
+            if state_architecture is not None and state_architecture != "v2":
+                raise ValueError("V4 text-slot router keys are inconsistent with the checkpoint native-reference tensor layout.")
+        elif routing_config["routing_mode"] == "competitive_text_slot_v1":
+            raise ValueError(
+                "Checkpoint metadata declares routing_mode='competitive_text_slot_v1' but no "
+                f"{ANIMA_NATIVE_REFERENCE_TEXT_SLOT_ROUTER_STATE_MARKER!r} state key is present."
+            )
+        elif routing_config["routing_alpha"] != 0.0:
+            raise ValueError("Legacy routing metadata must use routing_alpha=0.0 because no text-slot router is present.")
+    else:
+        # Published V1/V2 checkpoints intentionally have no routing metadata.
+        routing_config = {
+            "routing_mode": "legacy",
+            "routing_alpha": 0.0,
+            "router_temperature": 1.0,
+            "router_null_enabled": True,
+        }
+
+    if normalised_routing_sources:
+        config.update(routing_config)
     public_config = dict(config)
     # Preserve the exact public schema of historical V1 checkpoints. V2 adds
     # architecture/rank only when those fields are semantically required.
@@ -160,6 +424,13 @@ def inspect_anima_checkpoint(model_files: Union[str, List[str]]) -> Dict[str, An
         "native_reference_version": int(metadata.get("anima_native_reference_version", detected_version)),
         "native_reference_config": public_config,
         "native_reference_keys": tuple(native_keys),
+        "native_reference_text_slot_router": has_text_slot_router_state,
+        "native_reference_text_slot_router_keys": tuple(text_slot_router_keys),
+        "native_reference_routing_mode": routing_config["routing_mode"],
+        "native_reference_routing_alpha": routing_config["routing_alpha"],
+        "native_reference_router_temperature": routing_config["router_temperature"],
+        "native_reference_router_null_enabled": routing_config["router_null_enabled"],
+        "native_reference_router_config": dict(routing_config),
         "metadata": metadata,
     }
 
@@ -169,13 +440,19 @@ def add_anima_architecture_metadata(
     state_dict: Dict[str, torch.Tensor],
     native_reference_config: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, str]:
-    """Return safetensors metadata describing integrated native-ref weights."""
+    """Return safetensors metadata describing integrated native-ref weights.
+
+    Historical V1/V2 saves retain their historical metadata schema unless a
+    routing config is explicitly supplied.  V4 router tensors, however, may
+    never be saved without a complete, duplicated routing contract.
+    """
 
     result = {str(k): str(v) for k, v in (metadata or {}).items()}
     native_keys = [key for key in state_dict if is_native_reference_state_key(key)]
     if not native_keys:
         return result
 
+    explicit_config = dict(native_reference_config or {})
     config: Dict[str, Any] = {
         "architecture": "v1",
         "rank": 64,
@@ -184,7 +461,8 @@ def add_anima_architecture_metadata(
         "gate_dim": 8,
         "initial_gate": 0.01,
     }
-    config.update(native_reference_config or {})
+    config.update(explicit_config)
+    has_text_slot_router_state = any(is_native_reference_text_slot_router_state_key(key) for key in state_dict)
     for key, tensor in state_dict.items():
         normalised_key = _normalise_anima_state_key(key)
         if normalised_key == "reference_slot_embeddings.weight":
@@ -192,8 +470,53 @@ def add_anima_architecture_metadata(
         if normalised_key.endswith(".native_reference_attn.k_down.weight"):
             config["architecture"] = "v2"
             config["rank"] = int(tensor.shape[0])
-    if config["architecture"] == "v2" and "initial_gate" not in (native_reference_config or {}):
+    if config["architecture"] == "v2" and "initial_gate" not in explicit_config:
         config["initial_gate"] = 0.5
+
+    explicit_routing_fields = {
+        key: explicit_config[key]
+        for key in _ANIMA_NATIVE_REFERENCE_ROUTING_CONFIG_KEYS
+        if key in explicit_config
+    }
+    stale_top_level_routing_metadata = any(
+        key in result
+        for key in (
+            ANIMA_NATIVE_REFERENCE_ROUTING_MODE_METADATA_KEY,
+            ANIMA_NATIVE_REFERENCE_ROUTING_ALPHA_METADATA_KEY,
+            ANIMA_NATIVE_REFERENCE_ROUTER_TEMPERATURE_METADATA_KEY,
+            ANIMA_NATIVE_REFERENCE_ROUTER_NULL_ENABLED_METADATA_KEY,
+            ANIMA_NATIVE_REFERENCE_ROUTER_CONFIG_METADATA_KEY,
+        )
+    )
+    routing_config: Optional[Dict[str, Any]] = None
+    if has_text_slot_router_state or explicit_routing_fields:
+        routing_config = _normalise_native_reference_routing_config(
+            explicit_routing_fields,
+            source="native_reference_config",
+        )
+        if has_text_slot_router_state:
+            if routing_config["routing_mode"] != "competitive_text_slot_v1":
+                raise ValueError(
+                    "V4 text-slot router state can only be saved with "
+                    "routing_mode='competitive_text_slot_v1'."
+                )
+            if config.get("architecture") != "v2":
+                raise ValueError("V4 text-slot router state must be saved with native-reference architecture='v2'.")
+        elif routing_config["routing_mode"] == "competitive_text_slot_v1":
+            raise ValueError(
+                "routing_mode='competitive_text_slot_v1' was provided, but the checkpoint state has no "
+                f"{ANIMA_NATIVE_REFERENCE_TEXT_SLOT_ROUTER_STATE_MARKER!r} key."
+            )
+        elif routing_config["routing_alpha"] != 0.0:
+            raise ValueError("Legacy routing metadata must use routing_alpha=0.0.")
+    elif stale_top_level_routing_metadata:
+        raise ValueError(
+            "Routing metadata was supplied without an explicit native_reference_config; refusing to save a "
+            "potentially mislabeled checkpoint."
+        )
+
+    if routing_config is not None:
+        config.update(routing_config)
     if config["architecture"] == "v1":
         config.pop("architecture", None)
         config.pop("rank", None)
@@ -202,6 +525,20 @@ def add_anima_architecture_metadata(
     version = 2 if config.get("architecture") == "v2" else ANIMA_NATIVE_REFERENCE_VERSION
     result["anima_native_reference_version"] = str(version)
     result[ANIMA_NATIVE_REFERENCE_CONFIG_METADATA_KEY] = json.dumps(config, sort_keys=True, separators=(",", ":"))
+    if routing_config is not None:
+        result[ANIMA_NATIVE_REFERENCE_ROUTING_MODE_METADATA_KEY] = routing_config["routing_mode"]
+        result[ANIMA_NATIVE_REFERENCE_ROUTING_ALPHA_METADATA_KEY] = str(routing_config["routing_alpha"])
+        result[ANIMA_NATIVE_REFERENCE_ROUTER_TEMPERATURE_METADATA_KEY] = str(
+            routing_config["router_temperature"]
+        )
+        result[ANIMA_NATIVE_REFERENCE_ROUTER_NULL_ENABLED_METADATA_KEY] = str(
+            routing_config["router_null_enabled"]
+        ).lower()
+        result[ANIMA_NATIVE_REFERENCE_ROUTER_CONFIG_METADATA_KEY] = json.dumps(
+            routing_config,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
     # Explicitly documents that numbered slots carry no fixed semantic role.
     result["anima_reference_slot_semantics"] = "ordered_image_index"
     result["anima_checkpoint_layout"] = "integrated_single_checkpoint"
@@ -241,6 +578,9 @@ def load_anima_model(
     native_reference_architecture: Optional[str] = None,
     native_reference_rank: Optional[int] = None,
     native_reference_scale: float = 1.0,
+    native_reference_routing_mode: Optional[str] = None,
+    native_reference_routing_alpha: Optional[float] = None,
+    native_reference_router_temperature: Optional[float] = None,
 ) -> anima_models.Anima:
     """
     Load Anima model from the specified checkpoint.
@@ -300,6 +640,59 @@ def load_anima_model(
                 )
     native_config.update({key: value for key, value in explicit_native_config.items() if value is not None})
 
+    checkpoint_has_text_slot_router = bool(checkpoint_info["native_reference_text_slot_router"])
+    checkpoint_routing_mode = str(checkpoint_info["native_reference_routing_mode"])
+    checkpoint_routing_alpha = float(checkpoint_info["native_reference_routing_alpha"])
+    checkpoint_router_temperature = float(checkpoint_info["native_reference_router_temperature"])
+    checkpoint_router_null_enabled = bool(checkpoint_info["native_reference_router_null_enabled"])
+
+    if native_reference_routing_mode is None:
+        requested_routing_mode = checkpoint_routing_mode
+    else:
+        requested_routing_mode = _validate_native_reference_routing_mode(
+            native_reference_routing_mode,
+            source="load_anima_model(native_reference_routing_mode)",
+        )
+    requested_routing_alpha = (
+        checkpoint_routing_alpha
+        if native_reference_routing_alpha is None
+        else _validate_native_reference_routing_float(
+            native_reference_routing_alpha,
+            name="routing_alpha",
+            source="load_anima_model(native_reference_routing_alpha)",
+        )
+    )
+    requested_router_temperature = (
+        checkpoint_router_temperature
+        if native_reference_router_temperature is None
+        else _validate_native_reference_routing_float(
+            native_reference_router_temperature,
+            name="router_temperature",
+            source="load_anima_model(native_reference_router_temperature)",
+        )
+    )
+
+    if checkpoint_has_text_slot_router and requested_routing_mode != checkpoint_routing_mode:
+        raise ValueError(
+            f"Text-slot router checkpoint routing_mode={checkpoint_routing_mode!r}, "
+            f"but {requested_routing_mode!r} was requested. A V4 graph cannot be loaded as legacy."
+        )
+    if requested_routing_mode == "legacy":
+        if native_reference_routing_alpha is not None and requested_routing_alpha != 0.0:
+            raise ValueError("native_reference_routing_alpha requires routing_mode='competitive_text_slot_v1'.")
+        if native_reference_router_temperature is not None and requested_router_temperature != 1.0:
+            raise ValueError("native_reference_router_temperature requires routing_mode='competitive_text_slot_v1'.")
+    elif not use_native_reference:
+        raise ValueError("Competitive text-slot routing requires native reference conditioning to be enabled.")
+
+    # The graph mode is checkpoint-authoritative.  A published V2 checkpoint
+    # explicitly upgraded through the CLI is still constructed as legacy here,
+    # loaded exactly, and receives freshly initialized router modules only after
+    # assign=True has populated every checkpoint tensor.
+    checkpoint_graph_routing_mode = (
+        "competitive_text_slot_v1" if checkpoint_has_text_slot_router else "legacy"
+    )
+
     # We currently support fixed DiT config for Anima models
     dit_config = {
         "max_img_h": 512,
@@ -343,6 +736,13 @@ def load_anima_model(
         "native_reference_initial_gate": float(native_config["initial_gate"]),
         "native_reference_architecture": str(native_config["architecture"]),
         "native_reference_rank": int(native_config["rank"]),
+        "native_reference_routing_mode": checkpoint_graph_routing_mode,
+        "native_reference_routing_alpha": (
+            checkpoint_routing_alpha if checkpoint_has_text_slot_router else 0.0
+        ),
+        "native_reference_router_temperature": (
+            checkpoint_router_temperature if checkpoint_has_text_slot_router else 1.0
+        ),
     }
     with init_empty_weights():
         model = anima_models.Anima(**dit_config)
@@ -364,6 +764,15 @@ def load_anima_model(
         exclude_keys=FP8_OPTIMIZATION_EXCLUDE_KEYS,
         weight_transform_hooks=rename_hooks,
     )
+
+    # Formal A1 pointer tensors are optional on older V4 flow-only files.
+    # Load them only after the base/text-router graph has been assigned and the
+    # separately materialized pointer heads exist on a real device.
+    pointer_state = {
+        key: sd.pop(key)
+        for key in list(sd)
+        if ".native_reference_attn.pointer_head." in key
+    }
 
     if fp8_scaled:
         apply_fp8_monkey_patch(model, sd, use_scaled_mm=False)
@@ -404,16 +813,70 @@ def load_anima_model(
             architecture=str(native_config["architecture"]),
             rank=int(native_config["rank"]),
         )
+    if use_native_reference and requested_routing_mode == "competitive_text_slot_v1":
+        if not checkpoint_has_text_slot_router:
+            # Exact V2/base assignment is complete at this point.  New V4
+            # tensors are therefore real initialized tensors, never meta tensors,
+            # and cannot perturb the published checkpoint load path.
+            model.enable_native_reference_text_slot_router(
+                routing_alpha=requested_routing_alpha,
+                router_temperature=requested_router_temperature,
+            )
+        else:
+            # Alpha and temperature are explicit runtime controls.  The graph and
+            # learned router weights remain checkpoint-authoritative, while CLI
+            # values may intentionally override the published sampling defaults.
+            if native_reference_routing_alpha is not None:
+                model.set_native_reference_routing_alpha(requested_routing_alpha)
+            if native_reference_router_temperature is not None:
+                model.set_native_reference_router_temperature(requested_router_temperature)
+        # Unlike alpha/temperature, null-route enablement has no CLI override in
+        # the structural-smoke contract.  It must therefore be restored from the
+        # integrated checkpoint metadata or evaluation silently changes graph
+        # semantics (the model constructor defaults this switch to True).
+        if checkpoint_has_text_slot_router:
+            if not hasattr(model, "set_native_reference_router_null_enabled"):
+                raise RuntimeError("Loaded V4 model lacks the router-null runtime setter.")
+            model.set_native_reference_router_null_enabled(checkpoint_router_null_enabled)
+
+    if pointer_state:
+        if not use_native_reference or requested_routing_mode != "competitive_text_slot_v1":
+            raise RuntimeError("Checkpoint contains A1 pointer tensors without a competitive V4 graph.")
+        if not hasattr(model, "enable_native_reference_pointer_supervision"):
+            raise RuntimeError("Runtime does not implement integrated A1 pointer supervision.")
+        model.enable_native_reference_pointer_supervision(max_slots=2)
+        expected_pointer = {
+            key
+            for key in model.state_dict()
+            if ".native_reference_attn.pointer_head." in key
+        }
+        if set(pointer_state) != expected_pointer:
+            missing_pointer = sorted(expected_pointer - set(pointer_state))
+            unexpected_pointer = sorted(set(pointer_state) - expected_pointer)
+            raise RuntimeError(
+                "Incomplete formal-A1 pointer state: "
+                f"missing={missing_pointer[:8]}, unexpected={unexpected_pointer[:8]}"
+            )
+        pointer_load = model.load_state_dict(pointer_state, strict=False, assign=True)
+        if pointer_load.unexpected_keys:
+            raise RuntimeError(f"Unexpected A1 pointer keys: {pointer_load.unexpected_keys[:8]}")
+
     if use_native_reference:
         model.set_native_reference_scale(native_reference_scale)
         logger.info(
-            "Native reference conditioning enabled: architecture=%s, rank=%s, max_images=%s, router_dim=%s, gate_dim=%s, scale=%s",
+            "Native reference conditioning enabled: architecture=%s, rank=%s, max_images=%s, "
+            "router_dim=%s, gate_dim=%s, scale=%s, routing_mode=%s, routing_alpha=%s, "
+            "router_temperature=%s, router_null_enabled=%s",
             native_config["architecture"],
             native_config["rank"],
             native_config["max_reference_images"],
             native_config["router_dim"],
             native_config["gate_dim"],
             native_reference_scale,
+            requested_routing_mode,
+            requested_routing_alpha,
+            requested_router_temperature,
+            checkpoint_router_null_enabled,
         )
 
     if enable_ip_adapter:

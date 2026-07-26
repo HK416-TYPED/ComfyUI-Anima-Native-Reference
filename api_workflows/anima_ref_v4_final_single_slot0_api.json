@@ -1,0 +1,77 @@
+{
+  "1": {
+    "inputs": {
+      "image": "reference_image_1.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Reference Image 1 / slot 0"
+    }
+  },
+  "2": {
+    "inputs": {
+      "checkpoint": "anima-v4-scaled-mix-50-30-20-e2-step49000-256area.safetensors",
+      "text_encoder": "qwen_3_06b_base.safetensors",
+      "vae": "qwen_image_vae.safetensors",
+      "offload_mode": "balanced",
+      "verify_release_sha256": true
+    },
+    "class_type": "AnimaNativeRefV4Loader",
+    "_meta": {
+      "title": "Anima Reference V4 Loader (Final 49k)"
+    }
+  },
+  "3": {
+    "inputs": {
+      "pipeline": [
+        "2",
+        0
+      ],
+      "reference_image": [
+        "1",
+        0
+      ],
+      "logical_slot": "Image 1 (slot 0)",
+      "preprocess_mode": "independent_reference",
+      "prompt": "Use Image 1 as the character identity reference. Generate a new illustration.",
+      "negative_prompt": "",
+      "seed": 20260724,
+      "width": 256,
+      "height": 256,
+      "steps": 30,
+      "cfg": 3.5,
+      "flow_shift": 5.0,
+      "reference_scale": 1.0,
+      "reference_max_area": 65536
+    },
+    "class_type": "AnimaNativeRefV4Generate1Ref",
+    "_meta": {
+      "title": "Anima V4 1Ref / logical slot 0"
+    }
+  },
+  "4": {
+    "inputs": {
+      "images": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview"
+    }
+  },
+  "5": {
+    "inputs": {
+      "filename_prefix": "anima_v4_single_slot0",
+      "images": [
+        "3",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save"
+    }
+  }
+}

@@ -1,10 +1,17 @@
-"""In-process runtime for the integrated Anima Native Reference V2 E180 model.
+"""In-process runtimes for integrated Anima Native Reference checkpoints.
 
 The runtime is deliberately independent from ComfyUI at import time.  A node can
 pass/receive ordinary Comfy ``IMAGE`` tensors (float ``[B,H,W,C]`` in ``[0,1]``)
 without writing temporary files.  The implementation is pinned to the vendored
-Anima runtime snapshot and fails closed when the checkpoint is not the exact
-E180 integrated-native-reference layout.
+Anima runtime snapshot and fails closed when a checkpoint is not one of the
+exact, audited integrated-native-reference layouts.
+
+The legacy V2 E180 runtime remains available so existing workflows keep their
+class IDs.  The V4 publication runtime is a separate fail-closed path for the
+final competitive text-slot-router checkpoint.  In that path raw Qwen states
+and masks are retained for routing, neutral-T5 supplies token IDs/masks only,
+the model's own LLM adapter supplies ordinary cross-attention, and the CFG
+negative branch reuses the *positive* router-only conditioning.
 
 There are two cache layers:
 
@@ -31,7 +38,7 @@ from pathlib import Path
 import sys
 import threading
 from types import ModuleType
-from typing import Any, Callable, Dict, Generic, Mapping, Optional, Tuple, TypeVar
+from typing import Any, Callable, Dict, Generic, Mapping, Optional, Sequence, Tuple, TypeVar
 
 import numpy as np
 from PIL import Image
@@ -40,6 +47,7 @@ import torch
 
 
 VENDORED_ANIMA_COMMIT = "2ae811d296ff4159c6024c4a86415d19961a388c"
+VENDORED_ANIMA_OVERLAY = "v4-scaled-mixture-final49k-20260724"
 
 E180_EXPECTED_SHA256 = (
     "1f970a7867dd7b65858d30b58135134ce84fd3b552ab27fc9f07e7f15209c6dd"
@@ -78,6 +86,49 @@ E180_REQUIRED_METADATA: Mapping[str, str] = {
     "ss_max_train_steps": "71200",
 }
 
+# Final self-contained scaled-mixture checkpoint produced by the formal 49k
+# run.  The underlying integrated reference architecture remains "v2"; V4 is
+# the project/release generation that adds the competitive text-slot router.
+V4_EXPECTED_SHA256 = (
+    "4500a4aad657e0d8e821607afe050b09931f84bf601ea1447ce2a52cca782e2f"
+)
+V4_EXPECTED_FILE_SIZE = 4_302_295_014
+V4_EXPECTED_TOTAL_TENSORS = 1_614
+V4_EXPECTED_NATIVE_TENSORS = 926
+V4_EXPECTED_CONFIG: Mapping[str, Any] = {
+    "architecture": "v2",
+    "gate_dim": 4,
+    "initial_gate": 0.5,
+    "max_reference_images": 2,
+    "rank": 64,
+    "router_dim": 64,
+    "router_null_enabled": True,
+    "router_temperature": 1.0,
+    "routing_alpha": 1.0,
+    "routing_mode": "competitive_text_slot_v1",
+}
+V4_REQUIRED_METADATA: Mapping[str, str] = {
+    "anima_checkpoint_layout": "integrated_single_checkpoint",
+    "anima_external_adapter_required": "false",
+    "anima_native_reference_conditioning": "true",
+    # This is intentionally "2": V4 did not rename the underlying native
+    # reference architecture serialized by the official implementation.
+    "anima_native_reference_version": "2",
+    "anima_prediction_objective": "rectified_flow_velocity",
+    "anima_reference_slot_semantics": "ordered_image_index",
+    "anima_native_reference_routing_mode": "competitive_text_slot_v1",
+    "anima_native_reference_routing_alpha": "1.0",
+    "anima_native_reference_router_temperature": "1.0",
+    "anima_native_reference_router_null_enabled": "true",
+    "anima_v4_scaled_mixture": "true",
+    "anima_v4_stage": "scaled_edit_character_dualref",
+    "modelspec.architecture": "anima-preview",
+    "ss_epoch": "2",
+    "ss_steps": "49000",
+    "ss_num_epochs": "2",
+    "ss_max_train_steps": "49000",
+}
+
 DEFAULT_REFERENCE_MAX_AREA = 65_536
 DEFAULT_VAE_CHUNK_SIZE = 64
 DEFAULT_TEXT_MAX_LENGTH = 512
@@ -85,9 +136,15 @@ DEFAULT_WIDTH = 256
 DEFAULT_HEIGHT = 256
 DEFAULT_STEPS = 40
 DEFAULT_GUIDANCE_SCALE = 1.0
+# Final V4 publication defaults.  Keep the legacy constants above unchanged so
+# existing E180 callers retain their accepted 40-step / CFG-1 behavior.
+V4_DEFAULT_STEPS = 30
+V4_DEFAULT_GUIDANCE_SCALE = 3.5
 DEFAULT_FLOW_SHIFT = 5.0
 DEFAULT_NATIVE_REFERENCE_SCALE = 1.0
 ORDERED_SLOT_IDS = ((0, 1),)
+SINGLE_SLOT_IDS = ((0,), (1,))
+V4_PREPROCESS_MODES = frozenset({"independent_reference", "match_output_edit"})
 # Keep the two most recently used heavyweight runtimes alive even when ComfyUI
 # runs with ``--cache-none`` or evicts a loader-node output.  Two entries allow
 # one alternate loader configuration without making model residency unbounded.
@@ -137,15 +194,48 @@ class E180CheckpointInfo:
 
 
 @dataclass(frozen=True)
+class V4CheckpointInfo:
+    fingerprint: FileFingerprint
+    metadata: Mapping[str, str]
+    config: Mapping[str, Any]
+    tensor_count: int
+    native_tensor_count: int
+    dtype_counts: Mapping[str, int]
+    sha256: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class RawPromptEncoding:
+    """CPU-resident raw Qwen plus neutral-T5-token conditioning."""
+
+    raw_qwen_context: torch.Tensor
+    source_attention_mask: torch.Tensor
+    target_input_ids: torch.Tensor
+    target_attention_mask: torch.Tensor
+
+    def as_sequence(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return (
+            self.raw_qwen_context,
+            self.source_attention_mask,
+            self.target_input_ids,
+            self.target_attention_mask,
+        )
+
+
+@dataclass(frozen=True)
 class RuntimeModules:
     anima_utils: ModuleType
     anima_models: ModuleType
     hunyuan_image_utils: ModuleType
     qwen_image_autoencoder_kl: ModuleType
+    strategy_anima: ModuleType
+    anima_text_conditioning: ModuleType
+    anima_reference_binding: ModuleType
 
 
 @dataclass(frozen=True)
 class RuntimeCacheKey:
+    runtime_kind: str
     checkpoint: FileFingerprint
     text_encoder: FileFingerprint
     vae: FileFingerprint
@@ -201,7 +291,7 @@ def _expect_metadata(metadata: Mapping[str, str], key: str, expected: str) -> No
     actual = metadata.get(key)
     if actual != expected:
         raise CheckpointValidationError(
-            f"E180 metadata mismatch for {key!r}: expected {expected!r}, got {actual!r}."
+            f"Checkpoint metadata mismatch for {key!r}: expected {expected!r}, got {actual!r}."
         )
 
 
@@ -310,6 +400,185 @@ def validate_e180_checkpoint(
         config=dict(config),
         tensor_count=E180_EXPECTED_TOTAL_TENSORS,
         native_tensor_count=len(native_keys),
+        dtype_counts=dict(dtype_counts),
+        sha256=checksum,
+    )
+
+
+def _v4_required_native_shapes() -> Dict[str, Tuple[int, ...]]:
+    shapes: Dict[str, Tuple[int, ...]] = {
+        "reference_slot_embeddings.weight": (2, 2048),
+        "reference_type_embedding": (2048,),
+    }
+    per_block: Mapping[str, Tuple[int, ...]] = {
+        "clause_pooler.key_proj.weight": (64, 1024),
+        "clause_pooler.pool_queries": (4, 64),
+        "clause_pooler.value_proj.weight": (64, 1024),
+        "competitive_film.weight": (128, 64),
+        "competitive_output_gain": (),
+        "competitive_router.candidate_key.weight": (64, 128),
+        "competitive_router.context_key.weight": (64, 64),
+        "competitive_router.target_query.weight": (64, 2048),
+        "condition_spatial.weight": (64, 64),
+        "head_gate.bias": (16,),
+        "head_gate.weight": (16, 64),
+        "k_down.weight": (64, 2048),
+        "k_up.weight": (2048, 64),
+        "output_down.weight": (64, 2048),
+        "output_up.weight": (2048, 64),
+        "pointer_head.bias": (2,),
+        "pointer_head.weight": (2, 64),
+        "prompt_key.weight": (64, 1024),
+        "prompt_value.weight": (64, 1024),
+        "query_correction.condition_proj.weight": (64, 64),
+        "query_correction.output_proj.bias": (2048,),
+        "query_correction.output_proj.weight": (2048, 64),
+        "query_correction.query_proj.weight": (64, 2048),
+        "reference_summary.weight": (64, 2048),
+        "router_mlp.1.weight": (64, 64),
+        "router_to_film.weight": (128, 64),
+        "slot_prompt_query.weight": (64, 2048),
+        "slot_summary.weight": (64, 2048),
+        "spatial_bias": (16,),
+        "target_spatial.weight": (64, 2048),
+        "timestep_summary.weight": (64, 2048),
+        "v_down.weight": (64, 2048),
+        "v_up.weight": (2048, 64),
+    }
+    for block_index in range(28):
+        stem = f"blocks.{block_index}.native_reference_attn"
+        for suffix, shape in per_block.items():
+            shapes[f"{stem}.{suffix}"] = shape
+    if len(shapes) != V4_EXPECTED_NATIVE_TENSORS:
+        raise AssertionError(
+            "Internal V4 native tensor-shape contract is incomplete: "
+            f"{len(shapes)} != {V4_EXPECTED_NATIVE_TENSORS}."
+        )
+    return shapes
+
+
+def validate_v4_checkpoint(
+    checkpoint_path: os.PathLike[str] | str,
+    *,
+    verify_sha256: bool = False,
+) -> V4CheckpointInfo:
+    """Validate the exact final 49k V4 checkpoint without loading tensor data."""
+
+    fingerprint = FileFingerprint.from_path(checkpoint_path)
+    path = Path(fingerprint.path)
+    if path.suffix.lower() != ".safetensors":
+        raise CheckpointValidationError(
+            f"Final V4 model must be a .safetensors file: {path}"
+        )
+    if fingerprint.size != V4_EXPECTED_FILE_SIZE:
+        raise CheckpointValidationError(
+            "Final V4 byte size mismatch: "
+            f"expected {V4_EXPECTED_FILE_SIZE}, got {fingerprint.size}."
+        )
+
+    dtype_counts: Dict[str, int] = {}
+    native_shapes: Dict[str, Tuple[int, ...]] = {}
+    with safe_open(str(path), framework="pt", device="cpu") as handle:
+        metadata = dict(handle.metadata() or {})
+        keys = list(handle.keys())
+        if len(keys) != V4_EXPECTED_TOTAL_TENSORS:
+            raise CheckpointValidationError(
+                "Final V4 tensor count mismatch: "
+                f"expected {V4_EXPECTED_TOTAL_TENSORS}, got {len(keys)}."
+            )
+        external_lora = [key for key in keys if _is_external_lora_key(key)]
+        if external_lora:
+            raise CheckpointValidationError(
+                "External LoRA tensors are forbidden; "
+                f"first keys: {external_lora[:5]!r}."
+            )
+        for raw_key in keys:
+            tensor_slice = handle.get_slice(raw_key)
+            dtype_name = str(tensor_slice.get_dtype())
+            dtype_counts[dtype_name] = dtype_counts.get(dtype_name, 0) + 1
+            if dtype_name != "BF16":
+                raise CheckpointValidationError(
+                    "Final V4 contains non-BF16 tensor "
+                    f"{raw_key!r} with dtype {dtype_name}."
+                )
+            if _is_native_reference_key(raw_key):
+                native_shapes[_normalise_state_key(raw_key)] = tuple(
+                    int(value) for value in tensor_slice.get_shape()
+                )
+
+    if len(native_shapes) != V4_EXPECTED_NATIVE_TENSORS:
+        raise CheckpointValidationError(
+            "Final V4 native-reference tensor count mismatch: "
+            f"expected {V4_EXPECTED_NATIVE_TENSORS}, got {len(native_shapes)}."
+        )
+    for key, expected in V4_REQUIRED_METADATA.items():
+        _expect_metadata(metadata, key, expected)
+
+    raw_config = metadata.get("anima_native_reference_config")
+    try:
+        config = json.loads(raw_config) if raw_config is not None else None
+    except (TypeError, ValueError) as exc:
+        raise CheckpointValidationError(
+            f"Invalid anima_native_reference_config JSON: {raw_config!r}."
+        ) from exc
+    if config != dict(V4_EXPECTED_CONFIG):
+        raise CheckpointValidationError(
+            "Final V4 native-reference config mismatch: "
+            f"expected {dict(V4_EXPECTED_CONFIG)!r}, got {config!r}."
+        )
+
+    raw_router_config = metadata.get("anima_native_reference_router_config")
+    expected_router_config = {
+        "router_null_enabled": True,
+        "router_temperature": 1.0,
+        "routing_alpha": 1.0,
+        "routing_mode": "competitive_text_slot_v1",
+    }
+    try:
+        router_config = (
+            json.loads(raw_router_config) if raw_router_config is not None else None
+        )
+    except (TypeError, ValueError) as exc:
+        raise CheckpointValidationError(
+            f"Invalid anima_native_reference_router_config JSON: {raw_router_config!r}."
+        ) from exc
+    if router_config != expected_router_config:
+        raise CheckpointValidationError(
+            "Final V4 router config mismatch: "
+            f"expected {expected_router_config!r}, got {router_config!r}."
+        )
+
+    expected_shapes = _v4_required_native_shapes()
+    missing = sorted(set(expected_shapes) - set(native_shapes))
+    unexpected = sorted(set(native_shapes) - set(expected_shapes))
+    if missing or unexpected:
+        raise CheckpointValidationError(
+            "Final V4 native key set mismatch: "
+            f"missing={missing[:8]!r}, unexpected={unexpected[:8]!r}."
+        )
+    for key, expected_shape in expected_shapes.items():
+        actual_shape = native_shapes[key]
+        if actual_shape != expected_shape:
+            raise CheckpointValidationError(
+                f"Final V4 tensor shape mismatch for {key!r}: "
+                f"expected {expected_shape}, got {actual_shape}."
+            )
+
+    checksum: Optional[str] = None
+    if verify_sha256:
+        checksum = _sha256_file(path)
+        if checksum != V4_EXPECTED_SHA256:
+            raise CheckpointValidationError(
+                "Final V4 SHA-256 mismatch: "
+                f"expected {V4_EXPECTED_SHA256}, got {checksum}."
+            )
+
+    return V4CheckpointInfo(
+        fingerprint=fingerprint,
+        metadata=metadata,
+        config=dict(config),
+        tensor_count=V4_EXPECTED_TOTAL_TENSORS,
+        native_tensor_count=len(native_shapes),
         dtype_counts=dict(dtype_counts),
         sha256=checksum,
     )
@@ -503,6 +772,11 @@ def validate_vendored_runtime(
         raise RuntimeImportError(
             f"Vendor commit mismatch: expected {VENDORED_ANIMA_COMMIT}, got {commit!r}."
         )
+    overlay = manifest.get("source_overlay")
+    if overlay != VENDORED_ANIMA_OVERLAY:
+        raise RuntimeImportError(
+            f"Vendor overlay mismatch: expected {VENDORED_ANIMA_OVERLAY}, got {overlay!r}."
+        )
     entries = manifest.get("files")
     if not isinstance(entries, list) or int(manifest.get("file_count", -1)) != len(
         entries
@@ -562,6 +836,10 @@ def load_runtime_modules(
         root / "library" / "__init__.py",
         root / "library" / "anima_utils.py",
         root / "library" / "anima_models.py",
+        root / "library" / "anima_reference_binding.py",
+        root / "library" / "anima_reference_router.py",
+        root / "library" / "anima_text_conditioning.py",
+        root / "library" / "strategy_anima.py",
         root / "library" / "hunyuan_image_utils.py",
         root / "library" / "qwen_image_autoencoder_kl.py",
         root / "configs" / "qwen3_06b" / "config.json",
@@ -599,6 +877,18 @@ def load_runtime_modules(
                     f"{_VENDOR_PACKAGE_NAME}.library.qwen_image_autoencoder_kl",
                     cached.qwen_image_autoencoder_kl,
                 ),
+                (
+                    f"{_VENDOR_PACKAGE_NAME}.library.strategy_anima",
+                    cached.strategy_anima,
+                ),
+                (
+                    f"{_VENDOR_PACKAGE_NAME}.library.anima_text_conditioning",
+                    cached.anima_text_conditioning,
+                ),
+                (
+                    f"{_VENDOR_PACKAGE_NAME}.library.anima_reference_binding",
+                    cached.anima_reference_binding,
+                ),
             ):
                 _validate_module_origin(module, root, name)
             for name in (
@@ -633,6 +923,15 @@ def load_runtime_modules(
             qwen_vae = importlib.import_module(
                 f"{_VENDOR_PACKAGE_NAME}.library.qwen_image_autoencoder_kl"
             )
+            strategy_anima = importlib.import_module(
+                f"{_VENDOR_PACKAGE_NAME}.library.strategy_anima"
+            )
+            anima_text_conditioning = importlib.import_module(
+                f"{_VENDOR_PACKAGE_NAME}.library.anima_text_conditioning"
+            )
+            anima_reference_binding = importlib.import_module(
+                f"{_VENDOR_PACKAGE_NAME}.library.anima_reference_binding"
+            )
             loha = importlib.import_module(f"{_VENDOR_PACKAGE_NAME}.networks.loha")
             lokr = importlib.import_module(f"{_VENDOR_PACKAGE_NAME}.networks.lokr")
         except Exception as exc:
@@ -654,13 +953,28 @@ def load_runtime_modules(
                 hunyuan_image_utils,
             ),
             (f"{_VENDOR_PACKAGE_NAME}.library.qwen_image_autoencoder_kl", qwen_vae),
+            (f"{_VENDOR_PACKAGE_NAME}.library.strategy_anima", strategy_anima),
+            (
+                f"{_VENDOR_PACKAGE_NAME}.library.anima_text_conditioning",
+                anima_text_conditioning,
+            ),
+            (
+                f"{_VENDOR_PACKAGE_NAME}.library.anima_reference_binding",
+                anima_reference_binding,
+            ),
             (f"{_VENDOR_PACKAGE_NAME}.networks.loha", loha),
             (f"{_VENDOR_PACKAGE_NAME}.networks.lokr", lokr),
         ):
             _validate_module_origin(module, root, name)
 
         modules = RuntimeModules(
-            anima_utils, anima_models, hunyuan_image_utils, qwen_vae
+            anima_utils,
+            anima_models,
+            hunyuan_image_utils,
+            qwen_vae,
+            strategy_anima,
+            anima_text_conditioning,
+            anima_reference_binding,
         )
         _RUNTIME_MODULES_BY_ROOT[cache_key] = modules
         return modules
@@ -1413,6 +1727,8 @@ class AnimaNativeReferenceV2Runtime:
                 setattr(self, name, None)
             self._qwen_tokenizer = None
             self._t5_tokenizer = None
+            if hasattr(self, "_tokenize_strategy"):
+                self._tokenize_strategy = None
         gc.collect()
         if self.device.type == "cuda" and torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -1426,10 +1742,680 @@ class AnimaNativeReferenceV2Runtime:
             pass
 
 
+class AnimaNativeReferenceV4Runtime(AnimaNativeReferenceV2Runtime):
+    """Final 49k competitive-router runtime for one or two logical ref slots."""
+
+    def __init__(
+        self,
+        checkpoint_path: os.PathLike[str] | str,
+        text_encoder_path: os.PathLike[str] | str,
+        vae_path: os.PathLike[str] | str,
+        *,
+        runtime_root: os.PathLike[str] | str | None = None,
+        device: str | torch.device | None = None,
+        offload_mode: str = "balanced",
+        attn_mode: str = "torch",
+        vae_chunk_size: int = DEFAULT_VAE_CHUNK_SIZE,
+        vae_disable_cache: bool = True,
+        prompt_cache_entries: int = 64,
+        reference_cache_entries: int = 16,
+        verify_checkpoint_sha256: bool = False,
+    ) -> None:
+        if offload_mode not in self.SUPPORTED_OFFLOAD_MODES:
+            raise ValueError(
+                f"Unsupported offload_mode {offload_mode!r}; "
+                f"expected one of {sorted(self.SUPPORTED_OFFLOAD_MODES)}."
+            )
+        if attn_mode != "torch":
+            raise ValueError(
+                "The final V4 fixed-one/two carrier supports attn_mode='torch' only."
+            )
+        if int(vae_chunk_size) <= 0:
+            raise ValueError("vae_chunk_size must be positive")
+
+        self.lock = threading.RLock()
+        self.checkpoint_info = validate_v4_checkpoint(
+            checkpoint_path, verify_sha256=verify_checkpoint_sha256
+        )
+        self.checkpoint_path = self.checkpoint_info.fingerprint.path
+        self.text_encoder_fingerprint = validate_qwen_text_encoder(
+            text_encoder_path, verify_sha256=verify_checkpoint_sha256
+        )
+        self.vae_fingerprint = validate_qwen_image_vae(
+            vae_path, verify_sha256=verify_checkpoint_sha256
+        )
+        self._release_sha256_verified = bool(verify_checkpoint_sha256)
+        self.text_encoder_path = self.text_encoder_fingerprint.path
+        self.vae_path = self.vae_fingerprint.path
+        self.runtime_root = str(
+            Path(runtime_root or default_runtime_root())
+            .expanduser()
+            .resolve(strict=True)
+        )
+        self.device = _resolve_device(device)
+        if self.device.type != "cuda":
+            raise AnimaRuntimeError(
+                "The final V4 publication runtime requires a CUDA BF16 device; "
+                f"got {self.device}."
+            )
+        if not torch.cuda.is_available():
+            raise AnimaRuntimeError(
+                "CUDA device was selected but torch.cuda.is_available() is false."
+            )
+        if (
+            hasattr(torch.cuda, "is_bf16_supported")
+            and not torch.cuda.is_bf16_supported()
+        ):
+            raise AnimaRuntimeError(
+                f"CUDA device {self.device} does not report BF16 support."
+            )
+
+        self.offload_mode = offload_mode
+        self.attention_mode = attn_mode
+        self.vae_chunk_size = int(vae_chunk_size)
+        self.vae_disable_cache = bool(vae_disable_cache)
+        self.dtype = torch.bfloat16
+        self._prompt_cache: _BoundedLRU[str, RawPromptEncoding] = _BoundedLRU(
+            prompt_cache_entries
+        )
+        self._reference_cache: _BoundedLRU[str, torch.Tensor] = _BoundedLRU(
+            reference_cache_entries
+        )
+        self._prompt_hits = 0
+        self._prompt_misses = 0
+        self._reference_hits = 0
+        self._reference_misses = 0
+        self._model_loads = 0
+        self._closed = False
+
+        self._modules = load_runtime_modules(self.runtime_root)
+        self._anima: Any = None
+        self._vae: Any = None
+        self._text_encoder: Any = None
+        self._qwen_tokenizer: Any = None
+        self._t5_tokenizer: Any = None
+        self._tokenize_strategy: Any = None
+        self._load_models_once()
+
+    def _load_models_once(self) -> None:
+        with self.lock:
+            if self._closed:
+                raise AnimaRuntimeError("Runtime is closed.")
+            if self._anima is not None:
+                return
+
+            self._anima = self._modules.anima_utils.load_anima_model(
+                self.device,
+                self.checkpoint_path,
+                self.attention_mode,
+                True,
+                self.device,
+                self.dtype,
+                False,
+                lora_weights_list=None,
+                lora_multipliers=None,
+                enable_ip_adapter=False,
+                enable_native_reference_conditioning=None,
+                native_reference_scale=DEFAULT_NATIVE_REFERENCE_SCALE,
+            )
+            self._anima.to(self.device, dtype=self.dtype)
+            self._anima.eval().requires_grad_(False)
+            if not bool(
+                getattr(self._anima, "native_reference_conditioning_enabled", False)
+            ):
+                raise AnimaRuntimeError(
+                    "Loaded final V4 model did not enable integrated reference conditioning."
+                )
+            if getattr(self._anima, "native_reference_architecture", None) != "v2":
+                raise AnimaRuntimeError(
+                    "Loaded final V4 model is not native-reference architecture V2."
+                )
+            if int(getattr(self._anima, "native_reference_max_images", -1)) != 2:
+                raise AnimaRuntimeError(
+                    "Loaded final V4 model does not expose exactly two logical slots."
+                )
+            if (
+                getattr(self._anima, "native_reference_routing_mode", None)
+                != "competitive_text_slot_v1"
+            ):
+                raise AnimaRuntimeError(
+                    "Loaded final V4 model did not construct competitive_text_slot_v1."
+                )
+            if float(
+                getattr(self._anima, "native_reference_routing_alpha", float("nan"))
+            ) != 1.0:
+                raise AnimaRuntimeError(
+                    "Loaded final V4 model did not retain routing_alpha=1.0."
+                )
+            if not bool(getattr(self._anima, "use_llm_adapter", False)):
+                raise AnimaRuntimeError(
+                    "Final V4 requires the native Qwen-to-neutral-T5 LLM adapter."
+                )
+            fixed12_setter = getattr(
+                self._anima, "set_native_reference_fixed12ref_vectorized", None
+            )
+            if fixed12_setter is None:
+                raise AnimaRuntimeError(
+                    "Vendored model lacks set_native_reference_fixed12ref_vectorized()."
+                )
+            fixed12_setter(True)
+
+            text_device: torch.device | str = (
+                self.device if self.offload_mode == "high_vram" else "cpu"
+            )
+            self._text_encoder, self._qwen_tokenizer = (
+                self._modules.anima_utils.load_qwen3_text_encoder(
+                    self.text_encoder_path,
+                    dtype=self.dtype,
+                    device=text_device,
+                    lora_weights=None,
+                    lora_multipliers=None,
+                )
+            )
+            self._text_encoder.eval().requires_grad_(False)
+            self._t5_tokenizer = self._modules.anima_utils.load_t5_tokenizer(None)
+            self._tokenize_strategy = (
+                self._modules.strategy_anima.AnimaTokenizeStrategy(
+                    qwen3_tokenizer=self._qwen_tokenizer,
+                    t5_tokenizer=self._t5_tokenizer,
+                    qwen3_max_length=DEFAULT_TEXT_MAX_LENGTH,
+                    t5_max_length=DEFAULT_TEXT_MAX_LENGTH,
+                )
+            )
+
+            vae_device: torch.device | str = (
+                self.device if self.offload_mode == "high_vram" else "cpu"
+            )
+            self._vae = self._modules.qwen_image_autoencoder_kl.load_vae(
+                self.vae_path,
+                device=vae_device,
+                disable_mmap=True,
+                spatial_chunk_size=self.vae_chunk_size,
+                disable_cache=self.vae_disable_cache,
+            )
+            self._vae.to(dtype=self.dtype)
+            self._vae.eval().requires_grad_(False)
+            self._model_loads += 1
+
+    @staticmethod
+    def _normalise_reference_request(
+        reference_images: Sequence[torch.Tensor],
+        reference_slot_ids: Sequence[int],
+        *,
+        preprocess_mode: str,
+    ) -> tuple[tuple[torch.Tensor, ...], tuple[int, ...]]:
+        images = tuple(reference_images)
+        slots = tuple(int(slot_id) for slot_id in reference_slot_ids)
+        if len(images) not in (1, 2):
+            raise InputValidationError(
+                f"Final V4 requires one or two physical reference images; got {len(images)}."
+            )
+        if len(slots) != len(images):
+            raise InputValidationError(
+                "reference_slot_ids must contain one logical slot per physical image: "
+                f"{len(slots)} != {len(images)}."
+            )
+        if len(set(slots)) != len(slots):
+            raise InputValidationError(
+                f"reference_slot_ids must be unique; got {slots!r}."
+            )
+        invalid = [slot_id for slot_id in slots if slot_id not in (0, 1)]
+        if invalid:
+            raise InputValidationError(
+                f"reference_slot_ids must be 0 or 1; got invalid values {invalid!r}."
+            )
+        if preprocess_mode not in V4_PREPROCESS_MODES:
+            raise InputValidationError(
+                f"Unknown preprocess_mode {preprocess_mode!r}; "
+                f"expected one of {sorted(V4_PREPROCESS_MODES)}."
+            )
+        if len(images) == 2 and preprocess_mode != "independent_reference":
+            raise InputValidationError(
+                "Two-reference V4 generation must use independent_reference "
+                "preprocessing; match_output_edit is a one-reference edit path."
+            )
+        return images, slots
+
+    def _preprocess_reference_v4(
+        self,
+        image: torch.Tensor,
+        *,
+        name: str,
+        preprocess_mode: str,
+        reference_max_area: int,
+        output_width: int,
+        output_height: int,
+    ) -> tuple[Image.Image, str]:
+        pil = self._comfy_image_to_pil(image, name=name).convert("RGB")
+        multiple_of = int(self._modules.qwen_image_autoencoder_kl.SCALE_FACTOR) * int(
+            self._anima.patch_spatial
+        )
+        target_size_hw = (
+            (int(output_height), int(output_width))
+            if preprocess_mode == "match_output_edit"
+            else None
+        )
+        try:
+            prepared = self._modules.strategy_anima.preprocess_anima_reference_image(
+                pil,
+                max_area=int(reference_max_area),
+                multiple_of=multiple_of,
+                target_size_hw=target_size_hw,
+                flipped=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise InputValidationError(
+                f"{name} preprocessing failed for mode {preprocess_mode!r}: {exc}"
+            ) from exc
+
+        pixels = prepared.tobytes()
+        digest = hashlib.sha256()
+        digest.update(b"anima-ref-v4-final49k-reference-latent-v1\0")
+        digest.update(
+            (
+                f"mode={preprocess_mode}|prepared={prepared.width}x{prepared.height}|"
+                f"output={output_width}x{output_height}|multiple={multiple_of}|"
+                f"max_area={reference_max_area}|"
+            ).encode("ascii")
+        )
+        digest.update(self.vae_fingerprint.path.encode("utf-8"))
+        digest.update(str(self.vae_fingerprint.size).encode("ascii"))
+        digest.update(str(self.vae_fingerprint.mtime_ns).encode("ascii"))
+        digest.update(pixels)
+        return prepared, digest.hexdigest()
+
+    def _encode_references(
+        self,
+        reference_images: Sequence[torch.Tensor],
+        *,
+        preprocess_mode: str,
+        reference_max_area: int,
+        output_width: int,
+        output_height: int,
+    ) -> list[list[torch.Tensor]]:
+        prepared = [
+            self._preprocess_reference_v4(
+                image,
+                name=f"reference_image_{index + 1}",
+                preprocess_mode=preprocess_mode,
+                reference_max_area=reference_max_area,
+                output_width=output_width,
+                output_height=output_height,
+            )
+            for index, image in enumerate(reference_images)
+        ]
+        cpu_latents: list[Optional[torch.Tensor]] = [None] * len(prepared)
+        misses: list[int] = []
+        for index, (_pil, key) in enumerate(prepared):
+            cached = self._reference_cache.get(key)
+            if cached is _MISSING:
+                self._reference_misses += 1
+                misses.append(index)
+            else:
+                self._reference_hits += 1
+                cpu_latents[index] = cached
+
+        if misses:
+            self._move_vae_to(self.device)
+            try:
+                vae_dtype = _module_dtype(self._vae, self.dtype)
+                for index in misses:
+                    pil, key = prepared[index]
+                    array = np.asarray(pil, dtype=np.uint8).copy()
+                    pixels = (
+                        torch.from_numpy(array).permute(2, 0, 1).float().div_(255.0)
+                    )
+                    pixels = (
+                        pixels.mul_(2.0)
+                        .sub_(1.0)
+                        .unsqueeze(0)
+                        .to(device=self.device, dtype=vae_dtype)
+                    )
+                    latent = self._vae.encode_pixels_to_latents(pixels).to(
+                        device="cpu", dtype=self.dtype
+                    )
+                    if latent.ndim == 5:
+                        latent = latent.squeeze(2)
+                    latent = latent.contiguous()
+                    self._reference_cache.put(key, latent)
+                    cpu_latents[index] = latent
+            finally:
+                self._offload_vae_if_needed()
+
+        if any(latent is None for latent in cpu_latents):
+            raise AssertionError("Reference latent cache/encode bookkeeping failed.")
+        # Never fabricate or duplicate a missing second reference.  One physical
+        # latent is the complete one-reference carrier.
+        return [
+            [
+                latent.to(device=self.device, dtype=self.dtype)
+                for latent in cpu_latents
+                if latent is not None
+            ]
+        ]
+
+    def _encode_text_uncached_v4(self, text: str) -> RawPromptEncoding:
+        # No process_escape: Unicode reaches both tokenizers byte-for-byte.
+        tokens = self._tokenize_strategy.tokenize(text)
+        if len(tokens) != 4:
+            raise AnimaRuntimeError(
+                "AnimaTokenizeStrategy did not return "
+                "[Qwen IDs, Qwen mask, T5 IDs, T5 mask]."
+            )
+        qwen_input_ids, qwen_attention_mask, target_input_ids, target_attention_mask = (
+            tokens
+        )
+        encoder_device = _module_device(self._text_encoder)
+        qwen_input_ids = qwen_input_ids.to(encoder_device)
+        qwen_attention_mask = qwen_attention_mask.to(encoder_device)
+        source_hidden_states = self._text_encoder(
+            input_ids=qwen_input_ids,
+            attention_mask=qwen_attention_mask,
+        ).last_hidden_state
+        source_hidden_states[~qwen_attention_mask.bool()] = 0
+        return RawPromptEncoding(
+            raw_qwen_context=source_hidden_states.to(
+                device="cpu", dtype=self.dtype
+            ).contiguous(),
+            source_attention_mask=qwen_attention_mask.to(device="cpu").contiguous(),
+            target_input_ids=target_input_ids.to(
+                device="cpu", dtype=torch.long
+            ).contiguous(),
+            target_attention_mask=target_attention_mask.to(
+                device="cpu"
+            ).contiguous(),
+        )
+
+    def _get_raw_text_encodings(
+        self, prompt: str, negative_prompt: str
+    ) -> tuple[RawPromptEncoding, RawPromptEncoding]:
+        if not isinstance(prompt, str) or not isinstance(negative_prompt, str):
+            raise InputValidationError("prompt and negative_prompt must be strings.")
+
+        values: Dict[str, RawPromptEncoding] = {}
+        missing: list[str] = []
+        seen: set[str] = set()
+        for text in (prompt, negative_prompt):
+            if text in seen:
+                continue
+            seen.add(text)
+            cached = self._prompt_cache.get(text)
+            if cached is _MISSING:
+                self._prompt_misses += 1
+                missing.append(text)
+            else:
+                self._prompt_hits += 1
+                values[text] = cached
+
+        if missing:
+            target_device: torch.device | str = (
+                "cpu" if self.offload_mode == "text_encoder_cpu" else self.device
+            )
+            self._text_encoder.to(target_device)
+            try:
+                for text in missing:
+                    encoded = self._encode_text_uncached_v4(text)
+                    self._prompt_cache.put(text, encoded)
+                    values[text] = encoded
+            finally:
+                self._offload_text_encoder_if_needed()
+
+        return values[prompt], values[negative_prompt]
+
+    def _prepare_text_conditionings(
+        self,
+        prompt: str,
+        negative_prompt: str,
+        *,
+        reference_slot_ids: tuple[int, ...],
+    ) -> tuple[Any, Any]:
+        positive_raw, negative_raw = self._get_raw_text_encodings(
+            prompt, negative_prompt
+        )
+        slot_rows = [list(reference_slot_ids)]
+        requires_binding = (
+            self._modules.anima_text_conditioning.reference_router_requires_clause_masks(
+                self._anima,
+                slot_rows,
+                use_reference_sequence=True,
+            )
+        )
+        if not requires_binding:
+            raise AnimaRuntimeError(
+                "The final V4 checkpoint unexpectedly did not require clause masks."
+            )
+        prepare = (
+            self._modules.anima_text_conditioning.prepare_anima_prompt_conditioning
+        )
+        try:
+            positive = prepare(
+                prompt,
+                positive_raw.as_sequence(),
+                tokenize_strategy=self._tokenize_strategy,
+                device=self.device,
+                dtype=self.dtype,
+                reference_slot_ids=slot_rows,
+                require_reference_binding=True,
+                max_slots=2,
+            )
+            negative = prepare(
+                negative_prompt,
+                negative_raw.as_sequence(),
+                tokenize_strategy=self._tokenize_strategy,
+                device=self.device,
+                dtype=self.dtype,
+                reference_slot_ids=None,
+                require_reference_binding=False,
+                max_slots=2,
+            )
+        except (TypeError, ValueError) as exc:
+            raise InputValidationError(
+                "Invalid V4 reference prompt. Use explicit canonical Image 1/"
+                f"Image 2 clauses matching the selected slots: {exc}"
+            ) from exc
+        masks = positive.reference_clause_masks
+        expected_shape = (1, 2, DEFAULT_TEXT_MAX_LENGTH)
+        if (
+            masks is None
+            or masks.dtype is not torch.bool
+            or tuple(masks.shape) != expected_shape
+        ):
+            raise AnimaRuntimeError(
+                "V4 reference_clause_masks contract violation: "
+                f"expected bool {expected_shape}, got "
+                f"{None if masks is None else (masks.dtype, tuple(masks.shape))}."
+            )
+        occupied = tuple(bool(masks[0, slot].any()) for slot in range(2))
+        expected_occupied = tuple(slot in reference_slot_ids for slot in range(2))
+        if occupied != expected_occupied:
+            raise AnimaRuntimeError(
+                "V4 clause-mask occupancy disagrees with logical slots: "
+                f"{occupied!r} != {expected_occupied!r}."
+            )
+        return positive, negative
+
+    def _denoise_v4(
+        self,
+        *,
+        positive_conditioning: Any,
+        negative_conditioning: Any,
+        reference_latents: list[list[torch.Tensor]],
+        reference_slot_ids: tuple[int, ...],
+        width: int,
+        height: int,
+        seed: int,
+        steps: int,
+        guidance_scale: float,
+        flow_shift: float,
+        progress_callback: Optional[Callable[[int, int], None]],
+        interrupt_callback: Optional[Callable[[], None]],
+    ) -> torch.Tensor:
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(int(seed))
+        shape = (
+            1,
+            int(self._modules.anima_models.Anima.LATENT_CHANNELS),
+            1,
+            height // 8,
+            width // 8,
+        )
+        latents = torch.randn(
+            shape, generator=generator, device="cpu", dtype=self.dtype
+        ).to(self.device)
+        padding_mask = torch.zeros(
+            1, 1, height // 8, width // 8, dtype=self.dtype, device=self.device
+        )
+        timesteps, sigmas = self._modules.hunyuan_image_utils.get_timesteps_sigmas(
+            int(steps), float(flow_shift), self.device
+        )
+        timesteps = (timesteps / 1000).to(self.device, dtype=self.dtype)
+        use_llm_adapter = bool(getattr(self._anima, "use_llm_adapter", False))
+        positive_text_kwargs = positive_conditioning.model_text_kwargs(
+            self.device,
+            self.dtype,
+            use_llm_adapter=use_llm_adapter,
+        )
+        # Standard negative text stays negative.  Only raw router context/mask
+        # and positive reference clauses are shared from the positive branch.
+        negative_text_kwargs = negative_conditioning.model_text_kwargs(
+            self.device,
+            self.dtype,
+            router_conditioning=positive_conditioning,
+            use_llm_adapter=use_llm_adapter,
+        )
+        slot_rows = [list(reference_slot_ids)]
+        do_cfg = float(guidance_scale) != 1.0
+        total = int(len(timesteps))
+        common_kwargs = {
+            "padding_mask": padding_mask,
+            "reference_latents": reference_latents,
+            "reference_slot_ids": slot_rows,
+            "reference_t_offset_scale": 10,
+            "ip_adapter_latents": None,
+            "ip_adapter_embeds": None,
+            "use_ip_adapter": False,
+            "use_reference_sequence": True,
+        }
+        for index, timestep in enumerate(timesteps):
+            if interrupt_callback is not None:
+                interrupt_callback()
+            timestep_batch = timestep.expand(latents.shape[0])
+            noise_pred = self._anima(
+                latents,
+                timestep_batch,
+                **common_kwargs,
+                **positive_text_kwargs,
+            )
+            if do_cfg:
+                uncond = self._anima(
+                    latents,
+                    timestep_batch,
+                    **common_kwargs,
+                    **negative_text_kwargs,
+                )
+                noise_pred = uncond + float(guidance_scale) * (noise_pred - uncond)
+            latents = self._modules.hunyuan_image_utils.step(
+                latents, noise_pred, sigmas, index
+            ).to(latents.dtype)
+            if progress_callback is not None:
+                progress_callback(index + 1, total)
+        return latents
+
+    def generate(
+        self,
+        reference_images: Sequence[torch.Tensor],
+        reference_slot_ids: Sequence[int],
+        prompt: str,
+        *,
+        negative_prompt: str = "",
+        preprocess_mode: str = "independent_reference",
+        width: int = DEFAULT_WIDTH,
+        height: int = DEFAULT_HEIGHT,
+        seed: int = 0,
+        steps: int = V4_DEFAULT_STEPS,
+        guidance_scale: float = V4_DEFAULT_GUIDANCE_SCALE,
+        flow_shift: float = DEFAULT_FLOW_SHIFT,
+        native_reference_scale: float = DEFAULT_NATIVE_REFERENCE_SCALE,
+        reference_max_area: int = DEFAULT_REFERENCE_MAX_AREA,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+        interrupt_callback: Optional[Callable[[], None]] = None,
+    ) -> torch.Tensor:
+        """Generate from exactly one or two real references and explicit slots."""
+
+        images, slots = self._normalise_reference_request(
+            reference_images,
+            reference_slot_ids,
+            preprocess_mode=preprocess_mode,
+        )
+        self._validate_sample_inputs(
+            width=width,
+            height=height,
+            seed=seed,
+            steps=steps,
+            guidance_scale=guidance_scale,
+            flow_shift=flow_shift,
+            native_reference_scale=native_reference_scale,
+            reference_max_area=reference_max_area,
+        )
+        with self.lock, torch.inference_mode():
+            self._ensure_open()
+            self._anima.to(self.device, dtype=self.dtype)
+            self._anima.set_native_reference_fixed12ref_vectorized(True)
+            self._anima.set_native_reference_scale(float(native_reference_scale))
+
+            reference_latents: Optional[list[list[torch.Tensor]]] = None
+            latent: Optional[torch.Tensor] = None
+            try:
+                # Fail closed on prompt/slot ambiguity before entering the VAE or
+                # denoising path.  This also prevents a cached stale mask from a
+                # different logical-slot request.
+                positive, negative = self._prepare_text_conditionings(
+                    prompt,
+                    negative_prompt,
+                    reference_slot_ids=slots,
+                )
+                reference_latents = self._encode_references(
+                    images,
+                    preprocess_mode=preprocess_mode,
+                    reference_max_area=int(reference_max_area),
+                    output_width=int(width),
+                    output_height=int(height),
+                )
+                latent = self._denoise_v4(
+                    positive_conditioning=positive,
+                    negative_conditioning=negative,
+                    reference_latents=reference_latents,
+                    reference_slot_ids=slots,
+                    width=int(width),
+                    height=int(height),
+                    seed=int(seed),
+                    steps=int(steps),
+                    guidance_scale=float(guidance_scale),
+                    flow_shift=float(flow_shift),
+                    progress_callback=progress_callback,
+                    interrupt_callback=interrupt_callback,
+                )
+                reference_latents = None
+                return self._decode_latent(latent)
+            finally:
+                reference_latents = None
+                latent = None
+
+    def verify_release_sha256(self) -> None:
+        with self.lock:
+            self._ensure_open()
+            if self._release_sha256_verified:
+                return
+            self.checkpoint_info = validate_v4_checkpoint(
+                self.checkpoint_path, verify_sha256=True
+            )
+            validate_qwen_text_encoder(self.text_encoder_path, verify_sha256=True)
+            validate_qwen_image_vae(self.vae_path, verify_sha256=True)
+            self._release_sha256_verified = True
+
+
 _MODEL_CACHE_LOCK = threading.RLock()
-_MODEL_CACHE: "OrderedDict[RuntimeCacheKey, AnimaNativeReferenceV2Runtime]" = (
-    OrderedDict()
-)
+_MODEL_CACHE: "OrderedDict[RuntimeCacheKey, AnimaNativeReferenceV2Runtime]" = OrderedDict()
 
 
 def _make_runtime_cache_key(
@@ -1443,11 +2429,13 @@ def _make_runtime_cache_key(
     attn_mode: str,
     vae_chunk_size: int,
     vae_disable_cache: bool,
+    runtime_kind: str = "v2",
 ) -> RuntimeCacheKey:
     root = (
         Path(runtime_root or default_runtime_root()).expanduser().resolve(strict=True)
     )
     return RuntimeCacheKey(
+        runtime_kind=str(runtime_kind),
         checkpoint=FileFingerprint.from_path(checkpoint_path),
         text_encoder=FileFingerprint.from_path(text_encoder_path),
         vae=FileFingerprint.from_path(vae_path),
@@ -1487,6 +2475,7 @@ def get_or_create_runtime(
         attn_mode=attn_mode,
         vae_chunk_size=vae_chunk_size,
         vae_disable_cache=vae_disable_cache,
+        runtime_kind="v2",
     )
     with _MODEL_CACHE_LOCK:
         runtime = _MODEL_CACHE.get(key)
@@ -1527,6 +2516,73 @@ def get_or_create_runtime(
         return runtime
 
 
+def get_or_create_v4_runtime(
+    checkpoint_path: os.PathLike[str] | str,
+    text_encoder_path: os.PathLike[str] | str,
+    vae_path: os.PathLike[str] | str,
+    *,
+    runtime_root: os.PathLike[str] | str | None = None,
+    device: str | torch.device | None = None,
+    offload_mode: str = "balanced",
+    attn_mode: str = "torch",
+    vae_chunk_size: int = DEFAULT_VAE_CHUNK_SIZE,
+    vae_disable_cache: bool = True,
+    prompt_cache_entries: int = 64,
+    reference_cache_entries: int = 16,
+    verify_checkpoint_sha256: bool = False,
+) -> AnimaNativeReferenceV4Runtime:
+    """Return the process-cached exact final-V4 runtime."""
+
+    key = _make_runtime_cache_key(
+        checkpoint_path,
+        text_encoder_path,
+        vae_path,
+        runtime_root=runtime_root,
+        device=device,
+        offload_mode=offload_mode,
+        attn_mode=attn_mode,
+        vae_chunk_size=vae_chunk_size,
+        vae_disable_cache=vae_disable_cache,
+        runtime_kind="v4-final49k",
+    )
+    with _MODEL_CACHE_LOCK:
+        runtime = _MODEL_CACHE.get(key)
+        if runtime is not None and not runtime._closed:
+            if not isinstance(runtime, AnimaNativeReferenceV4Runtime):
+                raise AnimaRuntimeError(
+                    "Runtime cache key collision between V2 and final V4."
+                )
+            runtime.set_condition_cache_limits(
+                prompt_cache_entries=prompt_cache_entries,
+                reference_cache_entries=reference_cache_entries,
+            )
+            if verify_checkpoint_sha256:
+                runtime.verify_release_sha256()
+            _MODEL_CACHE.move_to_end(key)
+            return runtime
+        if runtime is not None:
+            del _MODEL_CACHE[key]
+        created = AnimaNativeReferenceV4Runtime(
+            key.checkpoint.path,
+            key.text_encoder.path,
+            key.vae.path,
+            runtime_root=key.runtime_root,
+            device=key.device,
+            offload_mode=offload_mode,
+            attn_mode=attn_mode,
+            vae_chunk_size=vae_chunk_size,
+            vae_disable_cache=vae_disable_cache,
+            prompt_cache_entries=prompt_cache_entries,
+            reference_cache_entries=reference_cache_entries,
+            verify_checkpoint_sha256=verify_checkpoint_sha256,
+        )
+        _MODEL_CACHE[key] = created
+        _MODEL_CACHE.move_to_end(key)
+        while len(_MODEL_CACHE) > PROCESS_MODEL_CACHE_CAPACITY:
+            _MODEL_CACHE.popitem(last=False)
+        return created
+
+
 def clear_model_cache(*, close: bool = True) -> None:
     """Clear process-level model-cache references; optionally close live runtimes."""
 
@@ -1540,19 +2596,24 @@ def clear_model_cache(*, close: bool = True) -> None:
 
 __all__ = [
     "AnimaNativeReferenceV2Runtime",
+    "AnimaNativeReferenceV4Runtime",
     "AnimaRuntimeError",
     "CacheStatistics",
     "CheckpointValidationError",
     "E180CheckpointInfo",
     "FileFingerprint",
     "InputValidationError",
+    "RawPromptEncoding",
     "RuntimeImportError",
+    "V4CheckpointInfo",
     "clear_model_cache",
     "default_runtime_root",
     "get_or_create_runtime",
+    "get_or_create_v4_runtime",
     "load_runtime_modules",
     "validate_e180_checkpoint",
     "validate_qwen_image_vae",
     "validate_qwen_text_encoder",
+    "validate_v4_checkpoint",
     "validate_vendored_runtime",
 ]

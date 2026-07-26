@@ -1,13 +1,15 @@
 # Do not replace ComfyUI's torch/torchvision build. These are the additional
-# packages required by the pinned Anima E180 runtime. Lower bounds are the
-# known-good Pro6000 environment versions.
+# packages required by the pinned Anima V2/V4 runtime. Lower bounds are the
+# known-good RTX PRO 6000 environment versions.
 accelerate>=1.10.1,<2
 diffusers>=0.36.0,<1
 einops>=0.8.0,<1
+imagesize>=1.4.1,<2
 numpy>=1.26,<3
 opencv-python>=4.11,<5
 Pillow>=11,<13
 safetensors>=0.5.3,<1
 sentencepiece>=0.2,<1
+toml>=0.10.2,<1
 transformers>=4.57.6,<5
 tqdm>=4.66,<5

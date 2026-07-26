@@ -14,6 +14,11 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
 from _anima_native_ref_vendor.library import custom_offloading_utils, attention
+from _anima_native_ref_vendor.library.anima_reference_router import (
+    CompetitiveReferenceRouter,
+    SlotClausePooler,
+    ZeroInitQueryCorrection,
+)
 
 
 def to_device(x, device):
@@ -1455,6 +1460,33 @@ class NativeReferenceAttentionV2(NativeReferenceAttention):
         self.output_down = nn.Linear(query_dim, rank, bias=False)
         self.router_to_film = nn.Linear(router_dim, 2 * rank, bias=False)
         self.output_up = nn.Linear(rank, query_dim, bias=False)
+
+        # V4-R is an explicit, optional upgrade over a published V2 checkpoint.
+        # Keep only None/runtime scalars here so the historical V2 state_dict is
+        # unchanged.  ``enable_text_slot_router`` materializes new parameters
+        # either after loading V2 E180 or inside the meta graph for a V4 file.
+        self.clause_pooler: Optional[SlotClausePooler] = None
+        self.query_correction: Optional[ZeroInitQueryCorrection] = None
+        self.competitive_router: Optional[CompetitiveReferenceRouter] = None
+        self.competitive_film: Optional[nn.Linear] = None
+        self.competitive_output_gain: Optional[nn.Parameter] = None
+        # A1-only learned text pointer. It is materialized separately from the
+        # V4-R graph so older flow-only V4 checkpoints remain loadable and can
+        # be upgraded without leaving missing tensors on the meta device.
+        self.pointer_head: Optional[nn.Linear] = None
+        self.pointer_supervision_enabled = False
+        self.text_slot_router_enabled = False
+        self.text_slot_routing_alpha = 0.0
+        self.text_slot_router_temperature = 1.0
+        self.text_slot_router_null_enabled = True
+        # Runtime-only, detached [B,S+1] occupancy for logging/eval. It is not
+        # a buffer and never enters checkpoints.
+        self.last_competitive_route_summary: Optional[torch.Tensor] = None
+        # Runtime autograd outputs consumed immediately by the formal A1 loss.
+        # They are plain attributes (not buffers) and never enter checkpoints.
+        self.last_competitive_route_probabilities: Optional[torch.Tensor] = None
+        self.last_pointer_logits: Optional[torch.Tensor] = None
+        self.last_pointer_valid: Optional[torch.Tensor] = None
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -1490,6 +1522,254 @@ class NativeReferenceAttentionV2(NativeReferenceAttention):
         torch.nn.init.normal_(self.condition_spatial.weight, mean=0.0, std=0.01)
         torch.nn.init.zeros_(self.spatial_bias)
 
+    def enable_text_slot_router(
+        self,
+        *,
+        num_context_tokens: int = 4,
+        routing_alpha: float = 0.0,
+        router_temperature: float = 1.0,
+    ) -> None:
+        """Materialize the optional V4-R text-slot competitive branch.
+
+        Published V2 checkpoints do not contain these tensors.  Loaders must
+        either call this method *after* assigning a V2 state_dict or build it in
+        the empty-weight graph when a checkpoint explicitly advertises V4-R.
+        """
+
+        if self.text_slot_router_enabled:
+            self.set_text_slot_routing_alpha(routing_alpha)
+            self.set_text_slot_router_temperature(router_temperature)
+            return
+        if num_context_tokens <= 0:
+            raise ValueError("num_context_tokens must be positive.")
+
+        device = self.output_down.weight.device
+        dtype = self.output_down.weight.dtype
+        self.clause_pooler = SlotClausePooler(
+            hidden_dim=self.context_dim,
+            context_dim=self.router_dim,
+            num_context_tokens=num_context_tokens,
+            generic_fallback=True,
+        ).to(device=device, dtype=dtype)
+        self.query_correction = ZeroInitQueryCorrection(
+            query_dim=self.query_dim,
+            condition_dim=self.router_dim,
+            hidden_dim=self.rank,
+        ).to(device=device, dtype=dtype)
+        self.competitive_router = CompetitiveReferenceRouter(
+            candidate_dim=self.head_dim,
+            context_dim=self.router_dim,
+            target_dim=self.query_dim,
+            router_dim=self.router_dim,
+        ).to(device=device, dtype=dtype)
+        self.competitive_film = nn.Linear(self.router_dim, 2 * self.rank, bias=False).to(
+            device=device, dtype=dtype
+        )
+        nn.init.zeros_(self.competitive_film.weight)
+        self.competitive_output_gain = nn.Parameter(torch.ones((), device=device, dtype=dtype))
+        self.text_slot_router_enabled = True
+        self.set_text_slot_routing_alpha(routing_alpha)
+        self.set_text_slot_router_temperature(router_temperature)
+
+    def set_text_slot_routing_alpha(self, alpha: float) -> None:
+        alpha = float(alpha)
+        if not math.isfinite(alpha) or not 0.0 <= alpha <= 1.0:
+            raise ValueError(f"routing alpha must be finite and in [0,1], got {alpha!r}.")
+        self.text_slot_routing_alpha = alpha
+
+    def set_text_slot_router_temperature(self, temperature: float) -> None:
+        temperature = float(temperature)
+        if not math.isfinite(temperature) or temperature <= 0.0:
+            raise ValueError("router temperature must be finite and strictly positive.")
+        self.text_slot_router_temperature = temperature
+
+    def set_text_slot_router_null_enabled(self, enabled: bool) -> None:
+        self.text_slot_router_null_enabled = bool(enabled)
+
+    def enable_pointer_supervision(self, max_slots: int = 2) -> None:
+        """Materialize the formal-A1 text-number pointer on a real device.
+
+        The same classifier is applied to every independently pooled clause
+        context, so it cannot solve the task from physical/list position.
+        """
+
+        if not self.text_slot_router_enabled or self.clause_pooler is None:
+            raise RuntimeError("Enable the text-slot router before pointer supervision.")
+        if max_slots != 2:
+            raise ValueError("Formal A1 currently requires exactly two logical slots.")
+        if self.pointer_supervision_enabled:
+            if self.pointer_head is None or self.pointer_head.out_features != max_slots:
+                raise RuntimeError("Pointer supervision is only partially materialized.")
+            return
+        device = self.clause_pooler.value_proj.weight.device
+        dtype = self.clause_pooler.value_proj.weight.dtype
+        self.pointer_head = nn.Linear(self.router_dim, max_slots, bias=True).to(
+            device=device, dtype=dtype
+        )
+        # Uniform 0.5/0.5 start: no slot prior, while CE supplies a useful
+        # first-step gradient to the head and the shared clause pooler.
+        nn.init.zeros_(self.pointer_head.weight)
+        nn.init.zeros_(self.pointer_head.bias)
+        self.pointer_supervision_enabled = True
+
+    def _require_text_slot_router(self) -> tuple[
+        SlotClausePooler,
+        ZeroInitQueryCorrection,
+        CompetitiveReferenceRouter,
+        nn.Linear,
+        nn.Parameter,
+    ]:
+        if not self.text_slot_router_enabled:
+            raise RuntimeError("V4 text-slot router is not enabled for this native-reference module.")
+        modules = (
+            self.clause_pooler,
+            self.query_correction,
+            self.competitive_router,
+            self.competitive_film,
+            self.competitive_output_gain,
+        )
+        if any(module is None for module in modules):
+            raise RuntimeError("V4 text-slot router is only partially materialized.")
+        return modules  # type: ignore[return-value]
+
+    def _pool_competitive_clause(
+        self,
+        raw_qwen_context: torch.Tensor,
+        clause_mask: torch.Tensor,
+        source_attention_mask: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        clause_pooler, *_ = self._require_text_slot_router()
+        if clause_mask.ndim == 2:
+            clause_mask = clause_mask.unsqueeze(1)
+        if clause_mask.ndim != 3 or clause_mask.shape[:1] != raw_qwen_context.shape[:1]:
+            raise ValueError("clause_mask must be [B,L] or [B,1,L] and match raw Qwen batch.")
+        if clause_mask.shape[1] != 1 or clause_mask.shape[2] != raw_qwen_context.shape[1]:
+            raise ValueError("Each folded physical slot must receive exactly one logical-slot clause mask.")
+        token_valid = source_attention_mask.bool() if source_attention_mask is not None else (
+            raw_qwen_context.detach().abs().sum(dim=-1) > 0
+        )
+        router_dtype = clause_pooler.key_proj.weight.dtype
+        contexts, missing = clause_pooler(
+            raw_qwen_context.to(router_dtype),
+            clause_mask.to(device=raw_qwen_context.device, dtype=torch.bool),
+            token_valid=token_valid.to(device=raw_qwen_context.device, dtype=torch.bool),
+            generic_token_mask=token_valid.to(device=raw_qwen_context.device, dtype=torch.bool),
+            generic_fallback=True,
+        )
+        return contexts[:, 0], missing[:, 0]
+
+    def competitive_candidates_fixed2_padded(
+        self,
+        target_per_slot: torch.Tensor,
+        reference: torch.Tensor,
+        reference_mask: torch.Tensor,
+        raw_qwen_context_per_slot: torch.Tensor,
+        clause_mask_per_slot: torch.Tensor,
+        source_attention_mask_per_slot: Optional[torch.Tensor],
+        base_attention: Attention,
+        attn_params: attention.AttentionParams,
+        target_rope: Optional[torch.Tensor] = None,
+        reference_rope_B_L_D: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return ungated per-slot attended heads for competitive routing."""
+
+        if attn_params.attn_mode != "torch":
+            raise ValueError("V4 fixed-two competitive routing currently supports attn_mode=torch only.")
+        if reference_mask.dtype != torch.bool or reference_mask.shape != reference.shape[:2]:
+            raise ValueError("reference_mask must be bool [B*2, reference_length].")
+        _, query_correction, _, _, _ = self._require_text_slot_router()
+        contexts, clause_missing = self._pool_competitive_clause(
+            raw_qwen_context_per_slot,
+            clause_mask_per_slot,
+            source_attention_mask_per_slot,
+        )
+        clause_context = contexts.mean(dim=1)
+
+        batch_slots, target_len, _ = target_per_slot.shape
+        q_input = target_per_slot.to(base_attention.q_proj.weight.dtype)
+        ref_base_input = reference.to(base_attention.k_proj.weight.dtype)
+        delta_input = reference.to(self.k_down.weight.dtype)
+        q = base_attention.q_proj(q_input)
+        correction_dtype = query_correction.output_proj.weight.dtype
+        q = query_correction(q.to(correction_dtype), clause_context.to(correction_dtype)).to(q.dtype)
+        base_k = base_attention.k_proj(ref_base_input)
+        base_v = base_attention.v_proj(ref_base_input)
+        k = base_k + self.k_up(self.k_down(delta_input)).to(base_k.dtype)
+        v = base_v + self.v_up(self.v_down(delta_input)).to(base_v.dtype)
+
+        q = rearrange(q, "b l (h d) -> b l h d", h=self.num_heads, d=self.head_dim)
+        k = rearrange(k, "b l (h d) -> b l h d", h=self.num_heads, d=self.head_dim)
+        v = rearrange(v, "b l (h d) -> b l h d", h=self.num_heads, d=self.head_dim)
+        q = base_attention.q_norm(q)
+        k = base_attention.k_norm(k)
+        if target_rope is not None:
+            q = apply_rotary_pos_emb(q, target_rope, tensor_format="bshd", fused=False)
+        if reference_rope_B_L_D is not None:
+            k = _apply_batched_rotary_pos_emb_bshd(k, reference_rope_B_L_D)
+        if q.dtype != v.dtype and (
+            (not attn_params.supports_fp32 or attn_params.requires_same_dtype) and torch.is_autocast_enabled()
+        ):
+            q = q.to(v.dtype)
+            k = k.to(v.dtype)
+
+        attended = F.scaled_dot_product_attention(
+            q.transpose(1, 2),
+            k.transpose(1, 2),
+            v.transpose(1, 2),
+            attn_mask=reference_mask[:, None, None, :],
+            dropout_p=0.0,
+        ).transpose(1, 2)
+        attended = attended.reshape(batch_slots, target_len, self.num_heads, self.head_dim)
+        return attended, contexts, clause_missing
+
+    def merge_competitive_candidates(
+        self,
+        candidates: torch.Tensor,
+        clause_contexts: torch.Tensor,
+        target: torch.Tensor,
+        slot_valid: torch.Tensor,
+        base_attention: Attention,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Merge ``[B,S,N,H,D]`` candidates and reuse E180's output bottleneck."""
+
+        _, _, router, competitive_film, output_gain = self._require_text_slot_router()
+        router_dtype = router.candidate_key.weight.dtype
+        merged, probabilities = router(
+            candidates.to(router_dtype),
+            clause_contexts.to(router_dtype),
+            target.to(router_dtype),
+            slot_valid.to(device=target.device, dtype=torch.bool),
+            temperature=self.text_slot_router_temperature,
+            null_enabled=self.text_slot_router_null_enabled,
+        )
+        self.last_competitive_route_summary = probabilities.detach().mean(dim=(1, 2))
+        self.last_competitive_route_probabilities = probabilities
+        if self.pointer_supervision_enabled:
+            if self.pointer_head is None:
+                raise RuntimeError("Pointer supervision is enabled without a pointer head.")
+            pointer_context = clause_contexts.mean(dim=2).to(self.pointer_head.weight.dtype)
+            self.last_pointer_logits = self.pointer_head(pointer_context)
+            self.last_pointer_valid = slot_valid.to(device=target.device, dtype=torch.bool)
+        else:
+            self.last_pointer_logits = None
+            self.last_pointer_valid = None
+        valid_count = slot_valid.sum(dim=-1).clamp_min(1).to(merged.dtype)
+        merged = merged * valid_count[:, None, None, None]
+        merged = merged.reshape(target.shape[0], target.shape[1], self.query_dim)
+
+        slot_mass = probabilities[..., :-1].mean(dim=(1, 2))
+        clause_mean = clause_contexts.mean(dim=2).to(router_dtype)
+        denominator = slot_mass.sum(dim=-1, keepdim=True).clamp_min(torch.finfo(slot_mass.dtype).eps)
+        route_context = torch.sum(slot_mass.unsqueeze(-1) * clause_mean, dim=1) / denominator
+
+        residual_dtype = self.output_down.weight.dtype
+        bottleneck = F.silu(self.output_down(merged.to(residual_dtype)))
+        gamma, beta = competitive_film(route_context.to(competitive_film.weight.dtype)).chunk(2, dim=-1)
+        bottleneck = F.silu(bottleneck * (1.0 + gamma.unsqueeze(1)) + beta.unsqueeze(1))
+        delta = self.output_up(bottleneck) * output_gain.to(bottleneck.dtype)
+        delta = delta.to(base_attention.output_proj.weight.dtype)
+        result = F.linear(delta, base_attention.output_proj.weight, bias=None)
+        return base_attention.output_dropout(result), probabilities
     @torch.no_grad()
     def initialize_kv_from_base(self, base_attention: Attention) -> None:
         """V2 borrows frozen base K/V directly; no full-rank copy is owned."""
@@ -2047,8 +2327,13 @@ class Block(nn.Module):
         if self.native_reference_attn is None:
             raise RuntimeError("Native reference conditioning has not been enabled for this block.")
         batch = target.shape[0]
-        if references.shape[0] != batch * 2 or slot_embeddings.shape[0] != batch * 2:
-            raise ValueError("Fixed-two-reference block input must contain exactly B*2 ordered slots.")
+        if batch <= 0 or references.shape[0] % batch:
+            raise ValueError("Fixed reference block input must fold a whole number of slots per sample.")
+        slots_per_sample = references.shape[0] // batch
+        if slots_per_sample not in (1, 2):
+            raise ValueError("Fixed reference block supports exactly one or two slots per sample.")
+        if slot_embeddings.shape[0] != batch * slots_per_sample:
+            raise ValueError("Slot embeddings must match the folded fixed-reference batch.")
         if use_fp32:
             target = target.float()
 
@@ -2086,7 +2371,7 @@ class Block(nn.Module):
 
         normalized_target = self.layer_norm_native_reference(target)
         normalized_references = self.layer_norm_native_reference(updated_references)
-        per_slot_target = normalized_target.repeat_interleave(2, dim=0)
+        per_slot_target = normalized_target.repeat_interleave(slots_per_sample, dim=0)
         per_slot_residual = self.native_reference_attn.forward_fixed2_padded(
             per_slot_target,
             normalized_references,
@@ -2099,8 +2384,10 @@ class Block(nn.Module):
             target_rope=target_rope,
             reference_rope_B_L_D=reference_rope_B_L_D,
         )
-        # sample-major ordering is [sample0/slot0, sample0/slot1, ...].
-        reference_residual = per_slot_residual.reshape(batch, 2, target.shape[1], self.x_dim).sum(dim=1)
+        # sample-major ordering is [sample0/physical0, sample0/physical1, ...].
+        reference_residual = per_slot_residual.reshape(
+            batch, slots_per_sample, target.shape[1], self.x_dim
+        ).sum(dim=1)
         target = target + float(reference_scale) * reference_residual
 
         normalized = adaln(target, self.layer_norm_mlp, modulation["mlp"])
@@ -2155,6 +2442,253 @@ class Block(nn.Module):
                 )
             return torch_checkpoint(run, target, references, use_reentrant=False)
         return run(target, references)
+
+    def _forward_native_reference_fixed2_competitive(
+        self,
+        target: torch.Tensor,
+        legacy_references: torch.Tensor,
+        legacy_reference_mask: torch.Tensor,
+        competitive_references: torch.Tensor,
+        competitive_reference_mask: torch.Tensor,
+        target_embedding: torch.Tensor,
+        clean_reference_embedding: torch.Tensor,
+        crossattn_emb: torch.Tensor,
+        crossattn_emb_per_slot: torch.Tensor,
+        target_embedding_per_slot: torch.Tensor,
+        slot_embeddings: torch.Tensor,
+        attn_params: attention.AttentionParams,
+        target_rope: Optional[torch.Tensor],
+        legacy_reference_rope_B_L_D: torch.Tensor,
+        competitive_reference_rope_B_L_D: torch.Tensor,
+        target_adaln_lora: Optional[torch.Tensor],
+        clean_reference_adaln_lora: Optional[torch.Tensor],
+        raw_qwen_context_per_slot: torch.Tensor,
+        reference_clause_mask_per_slot: torch.Tensor,
+        source_attention_mask_per_slot: Optional[torch.Tensor],
+        use_fp32: bool,
+        reference_scale: float,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """V4-R target block with independent legacy and slot-neutral streams.
+
+        The published V2 path remains in :meth:`_forward_native_reference_fixed2`
+        without any V4 statements. This method is entered only when the model
+        routing alpha is strictly positive. During the alpha ramp it evolves
+        both the historical slot-embedded stream and a second slot-neutral
+        competitive stream. At alpha one the historical stream is not evaluated.
+        """
+
+        native = self.native_reference_attn
+        if not isinstance(native, NativeReferenceAttentionV2):
+            raise RuntimeError("Competitive text-slot routing requires native-reference architecture v2.")
+        if not native.text_slot_router_enabled:
+            raise RuntimeError("Competitive text-slot routing was requested before the V4 router was materialized.")
+
+        batch = target.shape[0]
+        if batch <= 0 or legacy_references.shape[0] % batch:
+            raise ValueError("Competitive reference input must fold a whole number of slots per sample.")
+        slots_per_sample = legacy_references.shape[0] // batch
+        if slots_per_sample not in (1, 2):
+            raise ValueError("Competitive reference block supports exactly one or two slots per sample.")
+        expected_folded_batch = batch * slots_per_sample
+        for name, tensor in (
+            ("legacy_references", legacy_references),
+            ("competitive_references", competitive_references),
+            ("slot_embeddings", slot_embeddings),
+            ("raw_qwen_context_per_slot", raw_qwen_context_per_slot),
+            ("reference_clause_mask_per_slot", reference_clause_mask_per_slot),
+        ):
+            if tensor.shape[0] != expected_folded_batch:
+                raise ValueError(
+                    f"{name} must contain exactly B*{slots_per_sample} folded slots."
+                )
+        if legacy_reference_mask.shape != legacy_references.shape[:2]:
+            raise ValueError("legacy_reference_mask must match legacy reference batch/length.")
+        if competitive_reference_mask.shape != competitive_references.shape[:2]:
+            raise ValueError("competitive_reference_mask must match competitive reference batch/length.")
+        if use_fp32:
+            target = target.float()
+
+        routing_alpha = float(native.text_slot_routing_alpha)
+        if not 0.0 < routing_alpha <= 1.0:
+            raise RuntimeError("The competitive block is valid only for routing alpha in (0,1].")
+
+        if routing_alpha < 1.0:
+            updated_legacy_references = self._forward_padded_reference_streams(
+                legacy_references,
+                legacy_reference_mask,
+                clean_reference_embedding,
+                attn_params,
+                legacy_reference_rope_B_L_D,
+                clean_reference_adaln_lora,
+                use_fp32,
+            )
+        else:
+            # Stable tensor-only output contract under activation checkpointing.
+            updated_legacy_references = legacy_references
+
+        # No learned slot embedding enters this stream. Logical-slot semantics
+        # arrive exclusively through the per-slot text clause mask below.
+        updated_competitive_references = self._forward_padded_reference_streams(
+            competitive_references,
+            competitive_reference_mask,
+            clean_reference_embedding,
+            attn_params,
+            competitive_reference_rope_B_L_D,
+            clean_reference_adaln_lora,
+            use_fp32,
+        )
+
+        modulation = self._flat_adaln_parameters(
+            target_embedding,
+            target_adaln_lora,
+            include_cross_attention=True,
+            use_fp32=use_fp32,
+        )
+
+        def adaln(x, norm, values):
+            shift, scale, _gate = values
+            return norm(x) * (1 + self._expand_flat_modulation(scale, x.shape[1])) + self._expand_flat_modulation(
+                shift, x.shape[1]
+            )
+
+        normalized = adaln(target, self.layer_norm_self_attn, modulation["self"])
+        result = self.self_attn(normalized, attn_params, None, rope_emb=target_rope)
+        target = target + self._expand_flat_modulation(modulation["self"][2], target.shape[1]) * result
+
+        normalized = adaln(target, self.layer_norm_cross_attn, modulation["cross"])
+        result = self.cross_attn(normalized, attn_params, crossattn_emb, rope_emb=target_rope)
+        target = target + self._expand_flat_modulation(modulation["cross"][2], target.shape[1]) * result
+
+        normalized_target = self.layer_norm_native_reference(target)
+        per_slot_target = normalized_target.repeat_interleave(slots_per_sample, dim=0)
+
+        legacy_residual = None
+        if routing_alpha < 1.0:
+            normalized_legacy = self.layer_norm_native_reference(updated_legacy_references)
+            per_slot_residual = native.forward_fixed2_padded(
+                per_slot_target,
+                normalized_legacy,
+                legacy_reference_mask,
+                crossattn_emb_per_slot,
+                target_embedding_per_slot,
+                slot_embeddings,
+                self.self_attn,
+                attn_params,
+                target_rope=target_rope,
+                reference_rope_B_L_D=legacy_reference_rope_B_L_D,
+            )
+            legacy_residual = per_slot_residual.reshape(
+                batch, slots_per_sample, target.shape[1], self.x_dim
+            ).sum(dim=1)
+
+        normalized_competitive = self.layer_norm_native_reference(updated_competitive_references)
+        candidates, clause_contexts, _clause_missing = native.competitive_candidates_fixed2_padded(
+            per_slot_target,
+            normalized_competitive,
+            competitive_reference_mask,
+            raw_qwen_context_per_slot,
+            reference_clause_mask_per_slot,
+            source_attention_mask_per_slot,
+            self.self_attn,
+            attn_params,
+            target_rope=target_rope,
+            reference_rope_B_L_D=competitive_reference_rope_B_L_D,
+        )
+        candidates = candidates.reshape(
+            batch,
+            slots_per_sample,
+            target.shape[1],
+            self.self_attn.n_heads,
+            self.self_attn.head_dim,
+        )
+        clause_contexts = clause_contexts.reshape(
+            batch,
+            slots_per_sample,
+            clause_contexts.shape[1],
+            clause_contexts.shape[2],
+        )
+        slot_valid = competitive_reference_mask.any(dim=-1).reshape(
+            batch, slots_per_sample
+        )
+        competitive_residual, _route_probabilities = native.merge_competitive_candidates(
+            candidates,
+            clause_contexts,
+            normalized_target,
+            slot_valid,
+            self.self_attn,
+        )
+
+        if routing_alpha == 1.0:
+            reference_residual = competitive_residual
+        else:
+            if legacy_residual is None:
+                raise RuntimeError("Legacy residual was not computed during a partial alpha blend.")
+            reference_residual = (1.0 - routing_alpha) * legacy_residual + routing_alpha * competitive_residual
+        target = target + float(reference_scale) * reference_residual
+
+        normalized = adaln(target, self.layer_norm_mlp, modulation["mlp"])
+        result = self.mlp(normalized)
+        target = target + self._expand_flat_modulation(modulation["mlp"][2], target.shape[1]) * result
+        return target, updated_legacy_references, updated_competitive_references
+
+    def forward_native_reference_fixed2_competitive(
+        self,
+        target: torch.Tensor,
+        legacy_references: torch.Tensor,
+        legacy_reference_mask: torch.Tensor,
+        competitive_references: torch.Tensor,
+        competitive_reference_mask: torch.Tensor,
+        target_embedding: torch.Tensor,
+        clean_reference_embedding: torch.Tensor,
+        crossattn_emb: torch.Tensor,
+        crossattn_emb_per_slot: torch.Tensor,
+        target_embedding_per_slot: torch.Tensor,
+        slot_embeddings: torch.Tensor,
+        attn_params: attention.AttentionParams,
+        target_rope: Optional[torch.Tensor],
+        legacy_reference_rope_B_L_D: torch.Tensor,
+        competitive_reference_rope_B_L_D: torch.Tensor,
+        target_adaln_lora: Optional[torch.Tensor],
+        clean_reference_adaln_lora: Optional[torch.Tensor],
+        raw_qwen_context_per_slot: torch.Tensor,
+        reference_clause_mask_per_slot: torch.Tensor,
+        source_attention_mask_per_slot: Optional[torch.Tensor],
+        use_fp32: bool = False,
+        reference_scale: float = 1.0,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        def run(target_tensor: torch.Tensor, legacy_tensor: torch.Tensor, competitive_tensor: torch.Tensor):
+            return self._forward_native_reference_fixed2_competitive(
+                target_tensor,
+                legacy_tensor,
+                legacy_reference_mask,
+                competitive_tensor,
+                competitive_reference_mask,
+                target_embedding,
+                clean_reference_embedding,
+                crossattn_emb,
+                crossattn_emb_per_slot,
+                target_embedding_per_slot,
+                slot_embeddings,
+                attn_params,
+                target_rope,
+                legacy_reference_rope_B_L_D,
+                competitive_reference_rope_B_L_D,
+                target_adaln_lora,
+                clean_reference_adaln_lora,
+                raw_qwen_context_per_slot,
+                reference_clause_mask_per_slot,
+                source_attention_mask_per_slot,
+                use_fp32,
+                reference_scale,
+            )
+
+        if self.training and self.gradient_checkpointing:
+            if self.cpu_offload_checkpointing or self.unsloth_offload_checkpointing:
+                raise NotImplementedError(
+                    "V4 fixed-two competitive routing currently supports regular non-reentrant checkpointing only."
+                )
+            return torch_checkpoint(run, target, legacy_references, competitive_references, use_reentrant=False)
+        return run(target, legacy_references, competitive_references)
 
     def _forward_native_reference(
         self,
@@ -2721,6 +3255,9 @@ class Anima(nn.Module):
         native_reference_initial_gate: float = 0.01,
         native_reference_architecture: str = "v1",
         native_reference_rank: int = 64,
+        native_reference_routing_mode: str = "legacy",
+        native_reference_routing_alpha: float = 0.0,
+        native_reference_router_temperature: float = 1.0,
     ) -> None:
         super().__init__()
         self.max_img_h = max_img_h
@@ -2763,8 +3300,16 @@ class Anima(nn.Module):
         self.native_reference_architecture = native_reference_architecture
         self.native_reference_rank = native_reference_rank
         self.native_reference_scale = 1.0
+        if native_reference_routing_mode not in {"legacy", "competitive_text_slot_v1"}:
+            raise ValueError(f"Unsupported native reference routing mode: {native_reference_routing_mode!r}")
+        self.native_reference_routing_mode = native_reference_routing_mode
+        self.native_reference_routing_alpha = float(native_reference_routing_alpha)
+        self.native_reference_router_temperature = float(native_reference_router_temperature)
+        self.native_reference_router_null_enabled = True
+        self.native_reference_router_num_context_tokens = 4
         # Runtime-only optimization state; checkpoint schema is unchanged.
         self.native_reference_fixed2ref_vectorized_enabled = False
+        self.native_reference_fixed12ref_vectorized_enabled = False
         self.reference_slot_embeddings: Optional[nn.Embedding] = None
         self.register_parameter("reference_type_embedding", None)
 
@@ -2825,6 +3370,11 @@ class Anima(nn.Module):
                 architecture=native_reference_architecture,
                 rank=native_reference_rank,
             )
+            if native_reference_routing_mode == "competitive_text_slot_v1":
+                self.enable_native_reference_text_slot_router(
+                    routing_alpha=native_reference_routing_alpha,
+                    router_temperature=native_reference_router_temperature,
+                )
 
     def init_weights(self) -> None:
         self.x_embedder.init_weights()
@@ -2911,6 +3461,72 @@ class Anima(nn.Module):
         self.native_reference_rank = rank
         self.native_reference_conditioning_enabled = True
 
+    def enable_native_reference_text_slot_router(
+        self,
+        *,
+        routing_alpha: float = 0.0,
+        router_temperature: float = 1.0,
+        num_context_tokens: int = 4,
+    ) -> None:
+        """Upgrade an integrated V2 route to V4-R without touching base trunk weights."""
+
+        if not self.native_reference_conditioning_enabled:
+            raise RuntimeError("Enable native-reference conditioning before the V4 text-slot router.")
+        if self.native_reference_architecture != "v2":
+            raise ValueError("V4 text-slot routing requires native-reference architecture='v2'.")
+        for block in self.blocks:
+            module = block.native_reference_attn
+            if not isinstance(module, NativeReferenceAttentionV2):
+                raise RuntimeError("Every native-reference block must be V2 before router upgrade.")
+            module.enable_text_slot_router(
+                num_context_tokens=num_context_tokens,
+                routing_alpha=routing_alpha,
+                router_temperature=router_temperature,
+            )
+        self.native_reference_routing_mode = "competitive_text_slot_v1"
+        self.native_reference_router_num_context_tokens = int(num_context_tokens)
+        self.set_native_reference_routing_alpha(routing_alpha)
+        self.set_native_reference_router_temperature(router_temperature)
+
+    def enable_native_reference_pointer_supervision(self, max_slots: int = 2) -> None:
+        """Enable the integrated formal-A1 pointer in every V4-R block."""
+
+        if self.native_reference_routing_mode != "competitive_text_slot_v1":
+            raise RuntimeError("Pointer supervision requires competitive_text_slot_v1.")
+        for block in self.blocks:
+            module = block.native_reference_attn
+            if not isinstance(module, NativeReferenceAttentionV2):
+                raise RuntimeError("Every native-reference block must be V2.")
+            module.enable_pointer_supervision(max_slots=max_slots)
+
+    def set_native_reference_routing_alpha(self, alpha: float) -> None:
+        alpha = float(alpha)
+        if not math.isfinite(alpha) or not 0.0 <= alpha <= 1.0:
+            raise ValueError("Native reference routing alpha must be finite and in [0,1].")
+        if alpha > 0.0 and self.native_reference_routing_mode != "competitive_text_slot_v1":
+            raise RuntimeError("A positive routing alpha requires competitive_text_slot_v1 mode.")
+        self.native_reference_routing_alpha = alpha
+        for block in self.blocks:
+            module = block.native_reference_attn
+            if isinstance(module, NativeReferenceAttentionV2) and module.text_slot_router_enabled:
+                module.set_text_slot_routing_alpha(alpha)
+
+    def set_native_reference_router_temperature(self, temperature: float) -> None:
+        temperature = float(temperature)
+        if not math.isfinite(temperature) or temperature <= 0.0:
+            raise ValueError("Native reference router temperature must be finite and positive.")
+        self.native_reference_router_temperature = temperature
+        for block in self.blocks:
+            module = block.native_reference_attn
+            if isinstance(module, NativeReferenceAttentionV2) and module.text_slot_router_enabled:
+                module.set_text_slot_router_temperature(temperature)
+
+    def set_native_reference_router_null_enabled(self, enabled: bool) -> None:
+        self.native_reference_router_null_enabled = bool(enabled)
+        for block in self.blocks:
+            module = block.native_reference_attn
+            if isinstance(module, NativeReferenceAttentionV2) and module.text_slot_router_enabled:
+                module.set_text_slot_router_null_enabled(enabled)
     def disable_native_reference_conditioning(self) -> None:
         """Use the historical concatenated route without deleting native weights."""
         self.native_reference_conditioning_enabled = False
@@ -2928,6 +3544,24 @@ class Anima(nn.Module):
                 f"got {self.attn_mode!r}."
             )
         self.native_reference_fixed2ref_vectorized_enabled = enabled
+
+    def set_native_reference_fixed12ref_vectorized(self, enabled: bool) -> None:
+        """Enable the homogeneous one/two-reference vectorized carrier.
+
+        This is a runtime switch only.  It adds no checkpoint tensor and does
+        not weaken the historical strict fixed-two flag.  Two-reference batches
+        dispatch into the byte-for-byte existing fixed2 implementation; a
+        one-reference batch uses a compact ``B*1`` stream rather than
+        duplicating or fabricating a second physical image.
+        """
+
+        enabled = bool(enabled)
+        if enabled and self.attn_mode != "torch":
+            raise ValueError(
+                "Fixed-one/two-reference vectorization supports only attn_mode=torch "
+                f"(PyTorch SDPA); got {self.attn_mode!r}."
+            )
+        self.native_reference_fixed12ref_vectorized_enabled = enabled
 
     @property
     def device(self):
@@ -3140,6 +3774,151 @@ class Anima(nn.Module):
             )
         return [int(slot_id) for slot_id in slot_ids]
 
+    def _forward_native_reference_fixed1_sequence(
+        self,
+        x_B_C_T_H_W: torch.Tensor,
+        timesteps_B_T: torch.Tensor,
+        crossattn_emb: torch.Tensor,
+        padding_mask: Optional[torch.Tensor],
+        reference_latents: list[list[torch.Tensor]],
+        reference_slot_ids: Optional[list[list[int]]],
+    ) -> torch.Tensor:
+        """Vectorized legacy carrier for one real physical reference per sample."""
+
+        if self.attn_mode != "torch":
+            raise ValueError("Fixed-one-reference vectorization supports only attn_mode=torch.")
+        if not self.native_reference_conditioning_enabled:
+            raise RuntimeError("Native reference conditioning is disabled.")
+        if self.reference_slot_embeddings is None or self.reference_type_embedding is None:
+            raise RuntimeError("Native reference parameters were not materialized.")
+        if self.extra_per_block_abs_pos_emb:
+            raise NotImplementedError("Fixed-one-reference vectorization does not support extra absolute position embeddings.")
+        if x_B_C_T_H_W.shape[2] != 1:
+            raise NotImplementedError("Fixed-one-reference vectorization supports image training (T=1) only.")
+        batch = x_B_C_T_H_W.shape[0]
+        if len(reference_latents) != batch:
+            raise ValueError("reference_latents must contain one list per target batch item.")
+        if timesteps_B_T.ndim == 1:
+            timesteps_B_T = timesteps_B_T.unsqueeze(1)
+
+        target_tokens, target_ids, target_grid = self._prepare_flat_tokens(
+            x_B_C_T_H_W, t_offset=0, padding_mask=padding_mask
+        )
+        target_rope = self.pos_embedder.generate_embeddings_from_ids(target_ids, fps=None)
+
+        ref_tokens: list[torch.Tensor] = []
+        ref_ropes: list[torch.Tensor] = []
+        slot_embeddings: list[torch.Tensor] = []
+        lengths: list[int] = []
+        for batch_index, physical_references_value in enumerate(reference_latents):
+            physical_references = list(physical_references_value or [])
+            if len(physical_references) != 1 or physical_references[0] is None:
+                raise ValueError(
+                    "Fixed-one-reference routing requires exactly one non-missing physical "
+                    f"reference per sample; sample {batch_index} has {len(physical_references)}."
+                )
+            slot_ids = self._native_slot_ids_for_sample(
+                batch_index, 1, reference_slot_ids
+            )
+            slot_id = slot_ids[0]
+            if slot_id < 0 or slot_id >= self.reference_slot_embeddings.num_embeddings:
+                raise ValueError(
+                    f"Logical reference slot {slot_id} at sample {batch_index} is outside "
+                    f"[0, {self.reference_slot_embeddings.num_embeddings})."
+                )
+            ref_latent = physical_references[0]
+            if ref_latent.ndim == 4:
+                ref_latent = ref_latent.unsqueeze(2)
+            if ref_latent.ndim != 5 or ref_latent.shape[0] != 1:
+                raise ValueError("Each fixed reference latent must be [1,C,H,W] or [1,C,T,H,W].")
+            ref_latent = ref_latent.to(
+                device=x_B_C_T_H_W.device, dtype=x_B_C_T_H_W.dtype
+            )
+            tokens, ids, _grid = self._prepare_flat_tokens(
+                ref_latent, t_offset=0, padding_mask=None
+            )
+            tokens = tokens.squeeze(0)
+            slot_embedding = self.reference_slot_embeddings.weight[slot_id]
+            tokens = tokens + (
+                self.reference_type_embedding + slot_embedding
+            ).view(1, -1).to(tokens)
+            rope = self.pos_embedder.generate_embeddings_from_ids(
+                ids, fps=None
+            ).squeeze(1).squeeze(1)
+            ref_tokens.append(tokens)
+            ref_ropes.append(rope)
+            slot_embeddings.append(slot_embedding)
+            lengths.append(tokens.shape[0])
+
+        max_reference_length = max(lengths)
+        padded_tokens, padded_ropes, masks = [], [], []
+        for tokens, rope, length in zip(
+            ref_tokens, ref_ropes, lengths, strict=True
+        ):
+            pad = max_reference_length - length
+            padded_tokens.append(F.pad(tokens, (0, 0, 0, pad)))
+            padded_ropes.append(F.pad(rope, (0, 0, 0, pad)))
+            masks.append(
+                torch.cat(
+                    (
+                        torch.ones(length, dtype=torch.bool, device=tokens.device),
+                        torch.zeros(pad, dtype=torch.bool, device=tokens.device),
+                    )
+                )
+            )
+        references = torch.stack(padded_tokens)
+        reference_rope_B_L_D = torch.stack(padded_ropes)
+        reference_mask = torch.stack(masks)
+        slot_embedding_tensor = torch.stack(slot_embeddings)
+
+        target_embedding, target_adaln_lora = self.t_embedder(
+            timesteps_B_T[:, :1]
+        )
+        target_embedding = self.t_embedding_norm(target_embedding)
+        clean_timestep = torch.zeros_like(timesteps_B_T[:, :1])
+        clean_embedding, clean_adaln_lora = self.t_embedder(clean_timestep)
+        clean_embedding = self.t_embedding_norm(clean_embedding)
+        use_fp32 = target_tokens.dtype == torch.float16
+        attn_params = attention.AttentionParams.create_attention_params(
+            self.attn_mode, self.split_attn
+        )
+
+        for block_idx, block in enumerate(self.blocks):
+            if self.blocks_to_swap:
+                self.offloader.wait_for_block(block_idx)
+            target_tokens, references = block.forward_native_reference_fixed2(
+                target_tokens,
+                references,
+                reference_mask,
+                target_embedding,
+                clean_embedding,
+                crossattn_emb,
+                crossattn_emb,
+                target_embedding,
+                slot_embedding_tensor,
+                attn_params,
+                target_rope,
+                reference_rope_B_L_D,
+                target_adaln_lora,
+                clean_adaln_lora,
+                use_fp32=use_fp32,
+                reference_scale=self.native_reference_scale,
+            )
+            if self.blocks_to_swap:
+                self.offloader.submit_move_blocks(self.blocks, block_idx)
+
+        T, H, W = target_grid
+        x_target = rearrange(
+            target_tokens, "b (t h w) d -> b t h w d", t=T, h=H, w=W
+        )
+        x_out = self.final_layer(
+            x_target,
+            target_embedding,
+            adaln_lora_B_T_3D=target_adaln_lora,
+            use_fp32=use_fp32,
+        )
+        return self.unpatchify(x_out)
+
     def _forward_native_reference_fixed2_sequence(
         self,
         x_B_C_T_H_W: torch.Tensor,
@@ -3268,6 +4047,431 @@ class Anima(nn.Module):
                 clean_adaln_lora,
                 use_fp32=use_fp32,
                 reference_scale=self.native_reference_scale,
+            )
+            if self.blocks_to_swap:
+                self.offloader.submit_move_blocks(self.blocks, block_idx)
+
+        T, H, W = target_grid
+        x_target = rearrange(target_tokens, "b (t h w) d -> b t h w d", t=T, h=H, w=W)
+        x_out = self.final_layer(
+            x_target,
+            target_embedding,
+            adaln_lora_B_T_3D=target_adaln_lora,
+            use_fp32=use_fp32,
+        )
+        return self.unpatchify(x_out)
+
+    def _forward_native_reference_fixed1_competitive_sequence(
+        self,
+        x_B_C_T_H_W: torch.Tensor,
+        timesteps_B_T: torch.Tensor,
+        crossattn_emb: torch.Tensor,
+        raw_qwen_context: torch.Tensor,
+        source_attention_mask: Optional[torch.Tensor],
+        reference_clause_masks: torch.Tensor,
+        padding_mask: Optional[torch.Tensor],
+        reference_latents: list[list[torch.Tensor]],
+        reference_slot_ids: Optional[list[list[int]]],
+    ) -> torch.Tensor:
+        """V4-R compact carrier for one real reference in logical slot 0 or 1."""
+
+        if self.attn_mode != "torch":
+            raise ValueError("V4 fixed-one competitive routing supports only attn_mode=torch.")
+        if not self.native_reference_conditioning_enabled:
+            raise RuntimeError("Native reference conditioning is disabled.")
+        if self.native_reference_routing_mode != "competitive_text_slot_v1":
+            raise RuntimeError("The competitive sequence requires competitive_text_slot_v1 mode.")
+        if not 0.0 < float(self.native_reference_routing_alpha) <= 1.0:
+            raise RuntimeError("The competitive sequence is entered only for routing alpha in (0,1].")
+        if self.reference_slot_embeddings is None or self.reference_type_embedding is None:
+            raise RuntimeError("Native reference parameters were not materialized.")
+        if self.extra_per_block_abs_pos_emb:
+            raise NotImplementedError("V4 fixed-one routing does not support extra absolute position embeddings.")
+        if x_B_C_T_H_W.shape[2] != 1:
+            raise NotImplementedError("V4 fixed-one routing supports image training (T=1) only.")
+
+        batch = x_B_C_T_H_W.shape[0]
+        if len(reference_latents) != batch:
+            raise ValueError("reference_latents must contain one list per target batch item.")
+        if raw_qwen_context.ndim != 3 or raw_qwen_context.shape[0] != batch:
+            raise ValueError("raw_qwen_context must be [B,L,D] and match the target batch.")
+        if (
+            reference_clause_masks.dtype != torch.bool
+            or reference_clause_masks.ndim != 3
+            or reference_clause_masks.shape[0] != batch
+            or reference_clause_masks.shape[1] < 2
+            or reference_clause_masks.shape[2] != raw_qwen_context.shape[1]
+        ):
+            raise ValueError(
+                "reference_clause_masks must be bool [B,S,L], include logical slots 0/1, "
+                "and match raw_qwen_context."
+            )
+        if source_attention_mask is not None and (
+            source_attention_mask.ndim != 2
+            or tuple(source_attention_mask.shape)
+            != tuple(raw_qwen_context.shape[:2])
+        ):
+            raise ValueError("source_attention_mask must be [B,L] and match raw_qwen_context.")
+        if timesteps_B_T.ndim == 1:
+            timesteps_B_T = timesteps_B_T.unsqueeze(1)
+
+        target_tokens, target_ids, target_grid = self._prepare_flat_tokens(
+            x_B_C_T_H_W, t_offset=0, padding_mask=padding_mask
+        )
+        target_rope = self.pos_embedder.generate_embeddings_from_ids(
+            target_ids, fps=None
+        )
+
+        legacy_tokens: list[torch.Tensor] = []
+        legacy_ropes: list[torch.Tensor] = []
+        legacy_slot_embeddings: list[torch.Tensor] = []
+        competitive_tokens: list[torch.Tensor] = []
+        competitive_ropes: list[torch.Tensor] = []
+        physical_slot_ids: list[int] = []
+        for batch_index, physical_references_value in enumerate(reference_latents):
+            physical_references = list(physical_references_value or [])
+            if len(physical_references) != 1 or physical_references[0] is None:
+                raise ValueError(
+                    "V4 fixed-one routing requires exactly one non-missing physical reference "
+                    f"per sample; sample {batch_index} has {len(physical_references)}."
+                )
+            slot_id = self._native_slot_ids_for_sample(
+                batch_index, 1, reference_slot_ids
+            )[0]
+            if slot_id not in (0, 1):
+                raise ValueError(
+                    f"V4 single-reference routing requires logical slot 0 or 1, got {slot_id}."
+                )
+            ref_latent = physical_references[0]
+            if ref_latent.ndim == 4:
+                ref_latent = ref_latent.unsqueeze(2)
+            if ref_latent.ndim != 5 or ref_latent.shape[0] != 1:
+                raise ValueError("Each fixed reference latent must be [1,C,H,W] or [1,C,T,H,W].")
+            ref_latent = ref_latent.to(
+                device=x_B_C_T_H_W.device, dtype=x_B_C_T_H_W.dtype
+            )
+            tokens, ids, _grid = self._prepare_flat_tokens(
+                ref_latent, t_offset=0, padding_mask=None
+            )
+            tokens = tokens.squeeze(0)
+            rope = self.pos_embedder.generate_embeddings_from_ids(
+                ids, fps=None
+            ).squeeze(1).squeeze(1)
+            slot_embedding = self.reference_slot_embeddings.weight[slot_id]
+            legacy_tokens.append(
+                tokens
+                + (self.reference_type_embedding + slot_embedding)
+                .view(1, -1)
+                .to(tokens)
+            )
+            legacy_ropes.append(rope)
+            legacy_slot_embeddings.append(slot_embedding)
+            competitive_tokens.append(
+                tokens + self.reference_type_embedding.view(1, -1).to(tokens)
+            )
+            competitive_ropes.append(rope)
+            physical_slot_ids.append(slot_id)
+
+        def pad_streams(
+            streams: list[torch.Tensor], ropes: list[torch.Tensor]
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            lengths = [stream.shape[0] for stream in streams]
+            max_reference_length = max(lengths)
+            padded_streams, padded_ropes, masks = [], [], []
+            for stream, rope, length in zip(
+                streams, ropes, lengths, strict=True
+            ):
+                pad = max_reference_length - length
+                padded_streams.append(F.pad(stream, (0, 0, 0, pad)))
+                padded_ropes.append(F.pad(rope, (0, 0, 0, pad)))
+                masks.append(
+                    torch.cat(
+                        (
+                            torch.ones(length, dtype=torch.bool, device=stream.device),
+                            torch.zeros(pad, dtype=torch.bool, device=stream.device),
+                        )
+                    )
+                )
+            return (
+                torch.stack(padded_streams),
+                torch.stack(padded_ropes),
+                torch.stack(masks),
+            )
+
+        (
+            legacy_references,
+            legacy_reference_rope_B_L_D,
+            legacy_reference_mask,
+        ) = pad_streams(legacy_tokens, legacy_ropes)
+        (
+            competitive_references,
+            competitive_reference_rope_B_L_D,
+            competitive_reference_mask,
+        ) = pad_streams(competitive_tokens, competitive_ropes)
+        slot_embedding_tensor = torch.stack(legacy_slot_embeddings)
+        reference_clause_mask_per_slot = torch.stack(
+            [
+                reference_clause_masks[index, slot_id]
+                for index, slot_id in enumerate(physical_slot_ids)
+            ]
+        ).to(device=x_B_C_T_H_W.device, dtype=torch.bool)
+
+        target_embedding, target_adaln_lora = self.t_embedder(
+            timesteps_B_T[:, :1]
+        )
+        target_embedding = self.t_embedding_norm(target_embedding)
+        clean_timestep = torch.zeros_like(timesteps_B_T[:, :1])
+        clean_embedding, clean_adaln_lora = self.t_embedder(clean_timestep)
+        clean_embedding = self.t_embedding_norm(clean_embedding)
+        use_fp32 = target_tokens.dtype == torch.float16
+        attn_params = attention.AttentionParams.create_attention_params(
+            self.attn_mode, self.split_attn
+        )
+
+        for block_idx, block in enumerate(self.blocks):
+            if self.blocks_to_swap:
+                self.offloader.wait_for_block(block_idx)
+            (
+                target_tokens,
+                legacy_references,
+                competitive_references,
+            ) = block.forward_native_reference_fixed2_competitive(
+                target_tokens,
+                legacy_references,
+                legacy_reference_mask,
+                competitive_references,
+                competitive_reference_mask,
+                target_embedding,
+                clean_embedding,
+                crossattn_emb,
+                crossattn_emb,
+                target_embedding,
+                slot_embedding_tensor,
+                attn_params,
+                target_rope,
+                legacy_reference_rope_B_L_D,
+                competitive_reference_rope_B_L_D,
+                target_adaln_lora,
+                clean_adaln_lora,
+                raw_qwen_context,
+                reference_clause_mask_per_slot,
+                source_attention_mask,
+                use_fp32=use_fp32,
+                reference_scale=self.native_reference_scale,
+            )
+            if self.blocks_to_swap:
+                self.offloader.submit_move_blocks(self.blocks, block_idx)
+
+        T, H, W = target_grid
+        x_target = rearrange(
+            target_tokens, "b (t h w) d -> b t h w d", t=T, h=H, w=W
+        )
+        x_out = self.final_layer(
+            x_target,
+            target_embedding,
+            adaln_lora_B_T_3D=target_adaln_lora,
+            use_fp32=use_fp32,
+        )
+        return self.unpatchify(x_out)
+
+    def _forward_native_reference_fixed2_competitive_sequence(
+        self,
+        x_B_C_T_H_W: torch.Tensor,
+        timesteps_B_T: torch.Tensor,
+        crossattn_emb: torch.Tensor,
+        raw_qwen_context: torch.Tensor,
+        source_attention_mask: Optional[torch.Tensor],
+        reference_clause_masks: torch.Tensor,
+        padding_mask: Optional[torch.Tensor],
+        reference_latents: list[list[torch.Tensor]],
+        reference_slot_ids: Optional[list[list[int]]],
+    ) -> torch.Tensor:
+        """V4-R vectorized path with canonical, slot-neutral competitive streams."""
+
+        if self.attn_mode != "torch":
+            raise ValueError("V4 fixed-two competitive routing supports only attn_mode=torch (PyTorch SDPA).")
+        if not self.native_reference_conditioning_enabled:
+            raise RuntimeError("Native reference conditioning is disabled.")
+        if self.native_reference_routing_mode != "competitive_text_slot_v1":
+            raise RuntimeError("The competitive sequence requires competitive_text_slot_v1 mode.")
+        if not 0.0 < float(self.native_reference_routing_alpha) <= 1.0:
+            raise RuntimeError("The competitive sequence is entered only for routing alpha in (0,1].")
+        if self.reference_slot_embeddings is None or self.reference_type_embedding is None:
+            raise RuntimeError("Native reference parameters were not materialized.")
+        if self.extra_per_block_abs_pos_emb:
+            raise NotImplementedError("V4 fixed-two routing does not support extra absolute position embeddings.")
+        if x_B_C_T_H_W.shape[2] != 1:
+            raise NotImplementedError("V4 fixed-two routing supports image training (T=1) only.")
+
+        batch = x_B_C_T_H_W.shape[0]
+        if len(reference_latents) != batch:
+            raise ValueError("reference_latents must contain one list per target batch item.")
+        if raw_qwen_context.ndim != 3 or raw_qwen_context.shape[0] != batch:
+            raise ValueError("raw_qwen_context must be [B,L,D] and match the target batch.")
+        if reference_clause_masks.dtype != torch.bool or reference_clause_masks.ndim != 3:
+            raise TypeError("reference_clause_masks must be a bool [B,S,L] tensor.")
+        if tuple(reference_clause_masks.shape[:1]) != (batch,) or reference_clause_masks.shape[1] < 2:
+            raise ValueError("reference_clause_masks must contain at least logical slots 0 and 1 for every sample.")
+        if reference_clause_masks.shape[2] != raw_qwen_context.shape[1]:
+            raise ValueError("reference_clause_masks token length must match raw_qwen_context.")
+        if source_attention_mask is not None:
+            if source_attention_mask.ndim != 2 or tuple(source_attention_mask.shape) != tuple(raw_qwen_context.shape[:2]):
+                raise ValueError("source_attention_mask must be [B,L] and match raw_qwen_context.")
+        if timesteps_B_T.ndim == 1:
+            timesteps_B_T = timesteps_B_T.unsqueeze(1)
+
+        target_tokens, target_ids, target_grid = self._prepare_flat_tokens(
+            x_B_C_T_H_W,
+            t_offset=0,
+            padding_mask=padding_mask,
+        )
+        target_rope = self.pos_embedder.generate_embeddings_from_ids(target_ids, fps=None)
+
+        legacy_tokens: list[torch.Tensor] = []
+        legacy_ropes: list[torch.Tensor] = []
+        legacy_slot_embeddings: list[torch.Tensor] = []
+        competitive_tokens: list[torch.Tensor] = []
+        competitive_ropes: list[torch.Tensor] = []
+
+        for batch_index, physical_references_value in enumerate(reference_latents):
+            physical_references = list(physical_references_value or [])
+            if len(physical_references) != 2 or any(reference is None for reference in physical_references):
+                raise ValueError(
+                    "V4 fixed-two routing requires exactly two non-missing references per sample; "
+                    f"sample {batch_index} has {len(physical_references)} physical entries."
+                )
+            physical_slot_ids = self._native_slot_ids_for_sample(
+                batch_index,
+                2,
+                reference_slot_ids,
+            )
+            if sorted(physical_slot_ids) != [0, 1]:
+                raise ValueError(
+                    "V4 fixed-two competitive routing requires a one-to-one logical slot permutation [0,1]; "
+                    f"sample {batch_index} supplied {physical_slot_ids}."
+                )
+
+            neutral_by_logical_slot: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+            for physical_index, (ref_latent, slot_id) in enumerate(zip(physical_references, physical_slot_ids)):
+                if ref_latent.ndim == 4:
+                    ref_latent = ref_latent.unsqueeze(2)
+                if ref_latent.ndim != 5 or ref_latent.shape[0] != 1:
+                    raise ValueError("Each fixed reference latent must be [1,C,H,W] or [1,C,T,H,W].")
+                ref_latent = ref_latent.to(device=x_B_C_T_H_W.device, dtype=x_B_C_T_H_W.dtype)
+                tokens, ids, _grid = self._prepare_flat_tokens(ref_latent, t_offset=0, padding_mask=None)
+                tokens = tokens.squeeze(0)
+                slot_embedding = self.reference_slot_embeddings.weight[slot_id]
+                rope = self.pos_embedder.generate_embeddings_from_ids(ids, fps=None).squeeze(1).squeeze(1)
+
+                # Historical physical ordering and learned slot embedding are
+                # preserved only for legacy_sum during alpha ramping.
+                legacy_tokens.append(
+                    tokens + (self.reference_type_embedding + slot_embedding).view(1, -1).to(tokens)
+                )
+                legacy_ropes.append(rope)
+                legacy_slot_embeddings.append(slot_embedding)
+
+                # Competitive streams are slot neutral and then canonicalized
+                # by logical ID, making S and P tensor-identical before routing.
+                if slot_id in neutral_by_logical_slot:
+                    raise ValueError(f"Duplicate logical slot {slot_id} in sample {batch_index}.")
+                neutral_by_logical_slot[slot_id] = (
+                    tokens + self.reference_type_embedding.view(1, -1).to(tokens),
+                    rope,
+                )
+
+            for logical_slot in (0, 1):
+                try:
+                    neutral_tokens, neutral_rope = neutral_by_logical_slot[logical_slot]
+                except KeyError as error:
+                    raise ValueError(
+                        f"Sample {batch_index} is missing required logical slot {logical_slot}."
+                    ) from error
+                competitive_tokens.append(neutral_tokens)
+                competitive_ropes.append(neutral_rope)
+
+        def pad_streams(
+            streams: list[torch.Tensor],
+            ropes: list[torch.Tensor],
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            lengths = [stream.shape[0] for stream in streams]
+            max_reference_length = max(lengths)
+            padded_streams: list[torch.Tensor] = []
+            padded_ropes: list[torch.Tensor] = []
+            masks: list[torch.Tensor] = []
+            for stream, rope, length in zip(streams, ropes, lengths):
+                pad = max_reference_length - length
+                padded_streams.append(F.pad(stream, (0, 0, 0, pad)))
+                padded_ropes.append(F.pad(rope, (0, 0, 0, pad)))
+                masks.append(
+                    torch.cat(
+                        (
+                            torch.ones(length, dtype=torch.bool, device=stream.device),
+                            torch.zeros(pad, dtype=torch.bool, device=stream.device),
+                        )
+                    )
+                )
+            return torch.stack(padded_streams), torch.stack(padded_ropes), torch.stack(masks)
+
+        legacy_references, legacy_reference_rope_B_L_D, legacy_reference_mask = pad_streams(
+            legacy_tokens,
+            legacy_ropes,
+        )
+        competitive_references, competitive_reference_rope_B_L_D, competitive_reference_mask = pad_streams(
+            competitive_tokens,
+            competitive_ropes,
+        )
+        slot_embedding_tensor = torch.stack(legacy_slot_embeddings)
+        crossattn_emb_per_slot = crossattn_emb.repeat_interleave(2, dim=0)
+        raw_qwen_context_per_slot = raw_qwen_context.repeat_interleave(2, dim=0)
+        source_attention_mask_per_slot = (
+            None if source_attention_mask is None else source_attention_mask.repeat_interleave(2, dim=0)
+        )
+        # Competitive streams are in canonical logical slot order, so flatten
+        # masks as [sample0/slot0, sample0/slot1, ...] regardless of physical list.
+        reference_clause_mask_per_slot = reference_clause_masks[:, :2].reshape(
+            batch * 2, reference_clause_masks.shape[-1]
+        ).to(device=x_B_C_T_H_W.device, dtype=torch.bool)
+
+        target_embedding, target_adaln_lora = self.t_embedder(timesteps_B_T[:, :1])
+        target_embedding = self.t_embedding_norm(target_embedding)
+        target_embedding_per_slot = target_embedding.repeat_interleave(2, dim=0)
+        clean_timestep = torch.zeros_like(timesteps_B_T[:, :1])
+        clean_embedding, clean_adaln_lora = self.t_embedder(clean_timestep)
+        clean_embedding = self.t_embedding_norm(clean_embedding).repeat_interleave(2, dim=0)
+        if clean_adaln_lora is not None:
+            clean_adaln_lora = clean_adaln_lora.repeat_interleave(2, dim=0)
+        use_fp32 = target_tokens.dtype == torch.float16
+        attn_params = attention.AttentionParams.create_attention_params(self.attn_mode, self.split_attn)
+
+        for block_idx, block in enumerate(self.blocks):
+            if self.blocks_to_swap:
+                self.offloader.wait_for_block(block_idx)
+            target_tokens, legacy_references, competitive_references = (
+                block.forward_native_reference_fixed2_competitive(
+                    target_tokens,
+                    legacy_references,
+                    legacy_reference_mask,
+                    competitive_references,
+                    competitive_reference_mask,
+                    target_embedding,
+                    clean_embedding,
+                    crossattn_emb,
+                    crossattn_emb_per_slot,
+                    target_embedding_per_slot,
+                    slot_embedding_tensor,
+                    attn_params,
+                    target_rope,
+                    legacy_reference_rope_B_L_D,
+                    competitive_reference_rope_B_L_D,
+                    target_adaln_lora,
+                    clean_adaln_lora,
+                    raw_qwen_context_per_slot,
+                    reference_clause_mask_per_slot,
+                    source_attention_mask_per_slot,
+                    use_fp32=use_fp32,
+                    reference_scale=self.native_reference_scale,
+                )
             )
             if self.blocks_to_swap:
                 self.offloader.submit_move_blocks(self.blocks, block_idx)
@@ -3481,8 +4685,10 @@ class Anima(nn.Module):
         source_attention_mask: Optional[torch.Tensor] = None,
         t5_input_ids: Optional[torch.Tensor] = None,
         t5_attn_mask: Optional[torch.Tensor] = None,
+        raw_qwen_context: Optional[torch.Tensor] = None,
         reference_latents: Optional[list[list[torch.Tensor]]] = None,
         reference_slot_ids: Optional[list[list[int]]] = None,
+        reference_clause_masks: Optional[torch.Tensor] = None,
         reference_t_offset_scale: int = 10,
         ip_adapter_latents: Optional[list[list[torch.Tensor]]] = None,
         ip_adapter_embeds: Optional[torch.Tensor] = None,
@@ -3500,6 +4706,11 @@ class Anima(nn.Module):
             t5_input_ids: Optional T5 token IDs (triggers LLM adapter when provided)
             t5_attn_mask: Optional T5 attention mask
         """
+        # Preserve raw Qwen tokens for V4 text-slot binding before the standard
+        # Qwen -> neutral-T5 LLM adapter changes the sequence representation.
+        if raw_qwen_context is None:
+            raw_qwen_context = crossattn_emb
+
         # Run LLM adapter inside forward for correct DDP gradient synchronization
         if t5_input_ids is not None and self.use_llm_adapter and hasattr(self, "llm_adapter"):
             crossattn_emb = self.llm_adapter(
@@ -3539,7 +4750,71 @@ class Anima(nn.Module):
                     "Native reference conditioning and IP-Adapter cannot be combined in one forward pass. "
                     "Pass only the generic ordered reference_latents route."
                 )
-            if self.native_reference_fixed2ref_vectorized_enabled:
+            routing_alpha = float(getattr(self, "native_reference_routing_alpha", 0.0))
+            if self.native_reference_fixed12ref_vectorized_enabled:
+                reference_counts = [
+                    len(list(refs or [])) for refs in reference_latents
+                ]
+                if not reference_counts or len(set(reference_counts)) != 1:
+                    raise ValueError(
+                        "The fixed-one/two carrier requires a task-homogeneous reference count."
+                    )
+                references_per_sample = reference_counts[0]
+                if references_per_sample not in (1, 2):
+                    raise ValueError(
+                        "The fixed-one/two carrier accepts exactly one or two real physical "
+                        f"references per sample, got {references_per_sample}."
+                    )
+                if references_per_sample == 1:
+                    if routing_alpha > 0.0:
+                        if self.native_reference_routing_mode != "competitive_text_slot_v1":
+                            raise RuntimeError(
+                                "A positive routing alpha requires competitive_text_slot_v1 mode."
+                            )
+                        if reference_clause_masks is None:
+                            raise ValueError(
+                                "Competitive text-slot routing requires reference_clause_masks."
+                            )
+                        return self._forward_native_reference_fixed1_competitive_sequence(
+                            x_B_C_T_H_W,
+                            timesteps_B_T,
+                            crossattn_emb,
+                            raw_qwen_context,
+                            source_attention_mask,
+                            reference_clause_masks,
+                            padding_mask,
+                            reference_latents,
+                            reference_slot_ids,
+                        )
+                    return self._forward_native_reference_fixed1_sequence(
+                        x_B_C_T_H_W,
+                        timesteps_B_T,
+                        crossattn_emb,
+                        padding_mask,
+                        reference_latents,
+                        reference_slot_ids,
+                    )
+                # For two references, preserve the audited B1 methods exactly.
+                if routing_alpha > 0.0:
+                    if self.native_reference_routing_mode != "competitive_text_slot_v1":
+                        raise RuntimeError(
+                            "A positive routing alpha requires competitive_text_slot_v1 mode."
+                        )
+                    if reference_clause_masks is None:
+                        raise ValueError(
+                            "Competitive text-slot routing requires reference_clause_masks."
+                        )
+                    return self._forward_native_reference_fixed2_competitive_sequence(
+                        x_B_C_T_H_W,
+                        timesteps_B_T,
+                        crossattn_emb,
+                        raw_qwen_context,
+                        source_attention_mask,
+                        reference_clause_masks,
+                        padding_mask,
+                        reference_latents,
+                        reference_slot_ids,
+                    )
                 return self._forward_native_reference_fixed2_sequence(
                     x_B_C_T_H_W,
                     timesteps_B_T,
@@ -3547,6 +4822,37 @@ class Anima(nn.Module):
                     padding_mask,
                     reference_latents,
                     reference_slot_ids,
+                )
+            if self.native_reference_fixed2ref_vectorized_enabled:
+                if routing_alpha > 0.0:
+                    if self.native_reference_routing_mode != "competitive_text_slot_v1":
+                        raise RuntimeError("A positive routing alpha requires competitive_text_slot_v1 mode.")
+                    if reference_clause_masks is None:
+                        raise ValueError("Competitive text-slot routing requires reference_clause_masks.")
+                    return self._forward_native_reference_fixed2_competitive_sequence(
+                        x_B_C_T_H_W,
+                        timesteps_B_T,
+                        crossattn_emb,
+                        raw_qwen_context,
+                        source_attention_mask,
+                        reference_clause_masks,
+                        padding_mask,
+                        reference_latents,
+                        reference_slot_ids,
+                    )
+                # Alpha zero dispatches into the untouched published V2 method;
+                # no V4 tensor is read or multiplied by zero.
+                return self._forward_native_reference_fixed2_sequence(
+                    x_B_C_T_H_W,
+                    timesteps_B_T,
+                    crossattn_emb,
+                    padding_mask,
+                    reference_latents,
+                    reference_slot_ids,
+                )
+            if routing_alpha > 0.0:
+                raise NotImplementedError(
+                    "V4 competitive routing is currently fail-closed to the audited fixed-two vectorized path."
                 )
             return self._forward_native_reference_sequence(
                 x_B_C_T_H_W,
@@ -3700,11 +5006,26 @@ class Anima(nn.Module):
         target_input_ids: Optional[torch.Tensor] = None,
         target_attention_mask: Optional[torch.Tensor] = None,
         source_attention_mask: Optional[torch.Tensor] = None,
+        raw_qwen_context: Optional[torch.Tensor] = None,
+        router_source_attention_mask: Optional[torch.Tensor] = None,
         reference_latents: Optional[list[list[torch.Tensor]]] = None,
         reference_slot_ids: Optional[list[list[int]]] = None,
+        reference_clause_masks: Optional[torch.Tensor] = None,
         reference_t_offset_scale: int = 10,
         **kwargs,
     ) -> torch.Tensor:
+        # Keep the exact published standard-text preprocessing order while also
+        # retaining a raw Qwen input for the optional V4 router. During CFG the
+        # frozen V4 contract is shared_positive_router: the negative branch uses
+        # its own standard text context, but reuses the positive branch's raw
+        # Qwen router context/mask. Explicit overrides make those channels
+        # independent without changing any legacy caller.
+        raw_qwen_context = context if raw_qwen_context is None else raw_qwen_context
+        router_attention_mask = (
+            source_attention_mask
+            if router_source_attention_mask is None
+            else router_source_attention_mask
+        )
         context = self._preprocess_text_embeds(context, target_input_ids, target_attention_mask, source_attention_mask)
         return self.forward_mini_train_dit(
             x,
@@ -3712,8 +5033,11 @@ class Anima(nn.Module):
             context,
             fps=fps,
             padding_mask=padding_mask,
+            source_attention_mask=router_attention_mask,
+            raw_qwen_context=raw_qwen_context,
             reference_latents=reference_latents,
             reference_slot_ids=reference_slot_ids,
+            reference_clause_masks=reference_clause_masks,
             reference_t_offset_scale=reference_t_offset_scale,
             **kwargs,
         )
@@ -4110,3 +5434,9 @@ class LLMAdapter(nn.Module):
 #     dit_config["rope_enable_fps_modulation"] = False
 
 #     return dit_config
+
+
+
+
+
+

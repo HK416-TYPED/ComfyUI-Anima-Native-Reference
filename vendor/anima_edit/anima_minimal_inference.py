@@ -23,6 +23,10 @@ from diffusers.utils.torch_utils import randn_tensor
 from PIL import Image
 
 from _anima_native_ref_vendor.library import anima_models, anima_utils, hunyuan_image_utils, qwen_image_autoencoder_kl, strategy_anima, strategy_base
+from _anima_native_ref_vendor.library.anima_text_conditioning import (
+    prepare_anima_prompt_conditioning,
+    reference_router_requires_clause_masks,
+)
 from _anima_native_ref_vendor.library.device_utils import clean_memory_on_device, synchronize_device
 
 lycoris_available = find_spec("lycoris") is not None
@@ -640,7 +644,12 @@ def process_escape(text: str) -> str:
 def prepare_text_inputs(
     args: argparse.Namespace, device: torch.device, anima: anima_models.Anima, shared_models: Optional[Dict] = None
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Prepare text-related inputs for T2I: LLM encoding. Anima model is also needed for preprocessing"""
+    """Encode and retain the raw Qwen + neutral-T5 standard text inputs.
+
+    The LLM adapter is deliberately *not* run here.  It remains inside
+    :meth:`Anima.forward`, where V4 can use the original Qwen sequence for
+    clause routing while preserving the standard Qwen-to-neutral-T5 path.
+    """
 
     # load text encoder: conds_cache holds cached encodings for prompts without padding
     conds_cache = {}
@@ -684,7 +693,7 @@ def prepare_text_inputs(
     logger.info("Encoding prompt with Text Encoder")
 
     prompt = process_escape(args.prompt)
-    cache_key = prompt
+    cache_key = ("anima_raw_qwen_t5_v1", prompt)
     if cache_key in conds_cache:
         embed = conds_cache[cache_key]
     else:
@@ -694,23 +703,17 @@ def prepare_text_inputs(
         encoding_strategy = strategy_base.TextEncodingStrategy.get_strategy()
 
         with torch.no_grad():
-            # embed = anima_text_encoder.get_text_embeds(anima, tokenizer, text_encoder, t5xxl_tokenizer, prompt)
             tokens = tokenize_strategy.tokenize(prompt)
             embed = encoding_strategy.encode_tokens(tokenize_strategy, [text_encoder], tokens)
-            crossattn_emb = anima._preprocess_text_embeds(
-                source_hidden_states=embed[0].to(anima.device),
-                target_input_ids=embed[2].to(anima.device),
-                target_attention_mask=embed[3].to(anima.device),
-                source_attention_mask=embed[1].to(anima.device),
-            )
-            crossattn_emb[~embed[3].bool()] = 0
-            embed[0] = crossattn_emb
-        embed[0] = embed[0].cpu()
+        embed = [
+            value.detach().cpu() if torch.is_tensor(value) else torch.as_tensor(value).cpu()
+            for value in embed
+        ]
 
         conds_cache[cache_key] = embed
 
     negative_prompt = process_escape(args.negative_prompt)
-    cache_key = negative_prompt
+    cache_key = ("anima_raw_qwen_t5_v1", negative_prompt)
     if cache_key in conds_cache:
         negative_embed = conds_cache[cache_key]
     else:
@@ -720,18 +723,12 @@ def prepare_text_inputs(
         encoding_strategy = strategy_base.TextEncodingStrategy.get_strategy()
 
         with torch.no_grad():
-            # negative_embed = anima_text_encoder.get_text_embeds(anima, tokenizer, text_encoder, t5xxl_tokenizer, negative_prompt)
             tokens = tokenize_strategy.tokenize(negative_prompt)
             negative_embed = encoding_strategy.encode_tokens(tokenize_strategy, [text_encoder], tokens)
-            crossattn_emb = anima._preprocess_text_embeds(
-                source_hidden_states=negative_embed[0].to(anima.device),
-                target_input_ids=negative_embed[2].to(anima.device),
-                target_attention_mask=negative_embed[3].to(anima.device),
-                source_attention_mask=negative_embed[1].to(anima.device),
-            )
-            crossattn_emb[~negative_embed[3].bool()] = 0
-            negative_embed[0] = crossattn_emb
-        negative_embed[0] = negative_embed[0].cpu()
+        negative_embed = [
+            value.detach().cpu() if torch.is_tensor(value) else torch.as_tensor(value).cpu()
+            for value in negative_embed
+        ]
 
         conds_cache[cache_key] = negative_embed
 
@@ -871,6 +868,31 @@ def resolve_inference_reference_slot_ids(
     return [slot_ids]
 
 
+def enable_competitive_reference_inference_carrier(
+    anima: anima_models.Anima,
+    *,
+    required: bool,
+) -> None:
+    """Enable the audited homogeneous one/two-reference runtime carrier.
+
+    The carrier switch is intentionally runtime-only and has no checkpoint
+    tensors.  Training enables it through ``anima_train_network.py``; standalone
+    inference must do the same before an alpha-positive competitive checkpoint
+    receives reference latents, otherwise the generic model path fails closed.
+    """
+
+    if not required:
+        return
+    setter = getattr(anima, "set_native_reference_fixed12ref_vectorized", None)
+    if setter is None:
+        raise RuntimeError(
+            "This competitive native-reference checkpoint requires the audited "
+            "fixed-one/two inference carrier, but the loaded Anima runtime does "
+            "not provide set_native_reference_fixed12ref_vectorized()."
+        )
+    setter(True)
+
+
 def generate_body(
     args: Union[argparse.Namespace, SimpleNamespace],
     anima: anima_models.Anima,
@@ -893,10 +915,8 @@ def generate_body(
 
     logger.info(f"Prompt: {context['prompt']}")
 
-    embed = context["embed"][0].to(device, dtype=torch.bfloat16)
     if context_null is None:
         context_null = context  # dummy for unconditional
-    negative_embed = context_null["embed"][0].to(device, dtype=torch.bfloat16)
 
     # Prepare latent variables
     num_channels_latents = anima_models.Anima.LATENT_CHANNELS
@@ -915,10 +935,6 @@ def generate_body(
     w_latent = latents.shape[-1]
     padding_mask = torch.zeros(bs, 1, h_latent, w_latent, dtype=torch.bfloat16, device=device)
 
-    logger.info(f"Embed: {embed.shape}, negative_embed: {negative_embed.shape}, latents: {latents.shape}")
-    embed = embed.to(torch.bfloat16)
-    negative_embed = negative_embed.to(torch.bfloat16)
-
     # Prepare timesteps
     timesteps, sigmas = hunyuan_image_utils.get_timesteps_sigmas(args.infer_steps, args.flow_shift, device)
     timesteps /= 1000  # scale to [0,1] range
@@ -933,6 +949,55 @@ def generate_body(
         ip_adapter_embeds=ip_adapter_embeds,
     )
     reference_slot_ids = resolve_inference_reference_slot_ids(args, anima, reference_latents)
+    tokenize_strategy = strategy_base.TokenizeStrategy.get_strategy()
+    require_reference_binding = reference_router_requires_clause_masks(
+        anima,
+        reference_slot_ids,
+        use_reference_sequence=not args.no_reference_sequence,
+    )
+    enable_competitive_reference_inference_carrier(
+        anima,
+        required=require_reference_binding,
+    )
+    positive_text_conditioning = prepare_anima_prompt_conditioning(
+        context["prompt"],
+        context["embed"],
+        tokenize_strategy=tokenize_strategy,
+        device=device,
+        dtype=torch.bfloat16,
+        reference_slot_ids=reference_slot_ids,
+        require_reference_binding=require_reference_binding,
+        max_slots=2,
+    )
+    negative_text_conditioning = prepare_anima_prompt_conditioning(
+        context_null["prompt"],
+        context_null["embed"],
+        tokenize_strategy=tokenize_strategy,
+        device=device,
+        dtype=torch.bfloat16,
+        reference_slot_ids=None,
+        require_reference_binding=False,
+        max_slots=2,
+    )
+    use_llm_adapter = bool(getattr(anima, "use_llm_adapter", False))
+    positive_text_kwargs = positive_text_conditioning.model_text_kwargs(
+        device,
+        torch.bfloat16,
+        use_llm_adapter=use_llm_adapter,
+    )
+    negative_text_kwargs = negative_text_conditioning.model_text_kwargs(
+        device,
+        torch.bfloat16,
+        router_conditioning=positive_text_conditioning,
+        use_llm_adapter=use_llm_adapter,
+    )
+    logger.info(
+        "Raw Qwen: %s, negative raw Qwen: %s, T5 IDs: %s, latents: %s",
+        tuple(positive_text_conditioning.raw_qwen_context.shape),
+        tuple(negative_text_conditioning.raw_qwen_context.shape),
+        tuple(positive_text_conditioning.target_input_ids.shape),
+        tuple(latents.shape),
+    )
 
     with tqdm(total=len(timesteps), desc="Denoising steps") as pbar:
         for i, t in enumerate(timesteps):
@@ -942,7 +1007,6 @@ def generate_body(
                 noise_pred = anima(
                     latents,
                     t_expand,
-                    embed,
                     padding_mask=padding_mask,
                     reference_latents=reference_latents,
                     reference_slot_ids=reference_slot_ids,
@@ -951,6 +1015,7 @@ def generate_body(
                     ip_adapter_embeds=ip_adapter_embeds,
                     use_ip_adapter=args.ip_adapter,
                     use_reference_sequence=not args.no_reference_sequence,
+                    **positive_text_kwargs,
                 )
 
             if do_cfg:
@@ -958,7 +1023,6 @@ def generate_body(
                     uncond_noise_pred = anima(
                         latents,
                         t_expand,
-                        negative_embed,
                         padding_mask=padding_mask,
                         reference_latents=reference_latents,
                         reference_slot_ids=reference_slot_ids,
@@ -967,6 +1031,7 @@ def generate_body(
                         ip_adapter_embeds=ip_adapter_embeds,
                         use_ip_adapter=args.ip_adapter,
                         use_reference_sequence=not args.no_reference_sequence,
+                        **negative_text_kwargs,
                     )
                 noise_pred = uncond_noise_pred + args.guidance_scale * (noise_pred - uncond_noise_pred)
 

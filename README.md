@@ -1,269 +1,421 @@
-# ComfyUI — Anima Native Reference V2 (E180)
+# ComfyUI — Anima Native Reference V4
 
-Research-preview ComfyUI custom nodes for the integrated **Anima Native
-Reference V2 E180** checkpoint. The plugin performs true two-reference
-generation through the model's native reference-latent sequence and V2
-reference attention route.
+ComfyUI custom nodes for the final, self-contained Anima competitive
+text-slot-router checkpoint. The plugin supports:
 
-It does **not** turn the model into img2img, does not use a stock KSampler, and
-does not mount a second LoRA or reference-adapter weight file.
+- one real reference assigned to logical **Image 1 / slot 0**;
+- one real reference assigned to logical **Image 2 / slot 1**; and
+- two real references assigned to logical slots **0 + 1**.
 
-![Workflow overview](example_workflows/anima_ref_v2_e180.jpg)
+Generation begins from pure noise. Visual information enters through native
+Qwen-Image VAE reference-latent sequences and integrated DiT reference
+attention. This is not img2img, so there is intentionally no denoise-strength
+input.
 
-## What is included
+The model file contains the learned reference route and competitive router.
+No external LoRA, IP-Adapter, ControlNet, or reference-adapter sidecar is
+mounted.
+
+Existing V2 E180 node class IDs and workflows remain in the package for
+backward compatibility.
+
+## Nodes
 
 | Node | Purpose |
 |---|---|
-| **Anima Reference V2 Loader (E180)** | Loads and caches the integrated E180 DiT, Anima Qwen3-0.6B text encoder, and Qwen-Image VAE. |
-| **Anima Reference V2 Generate (2 Refs)** | Generates one image from prompt + two explicit ordered reference inputs. |
+| **Anima Reference V4 Loader (Final 49k)** | Loads and process-caches the exact final integrated checkpoint, Qwen3-0.6B text encoder, and Qwen-Image VAE. |
+| **Anima Reference V4 Generate (1 Ref)** | Encodes one physical reference once, assigns it to logical slot 0 or 1, and supports character/reference or one-image-edit geometry. |
+| **Anima Reference V4 Generate (2 Refs)** | Encodes Image 1 and Image 2 independently and binds prompt clauses to logical slots 0 and 1. |
+| **Anima Reference V2 Loader (E180)** | Legacy E180 loader retained without changing its class ID. |
+| **Anima Reference V2 Generate (2 Refs)** | Legacy two-reference E180 generation node. |
 
-The package also includes:
+The V4 pipeline type is `ANIMA_NATIVE_REF_V4_PIPELINE`; it cannot be
+accidentally connected to the legacy V2 generation node.
 
-- a drag-and-drop UI workflow:
-  [`example_workflows/anima_ref_v2_e180.json`](example_workflows/anima_ref_v2_e180.json);
-- a local `/prompt` API workflow:
-  [`api_workflows/anima_ref_v2_e180_api.json`](api_workflows/anima_ref_v2_e180_api.json);
-- the pinned, namespaced Anima inference runtime required by the new V2
-  modules;
-- fail-closed model-layout checks and optional full SHA256 verification;
-- bounded model, prompt-embedding, and reference-latent caches.
+## Final checkpoint contract
 
-## Reference semantics — important
-
-The two inputs are:
+Place this file in `ComfyUI/models/diffusion_models/`:
 
 ```text
-Reference Image 1 -> ordered slot 0
-Reference Image 2 -> ordered slot 1
+anima-v4-scaled-mix-50-30-20-e2-step49000-256area.safetensors
 ```
 
-They are **not** hard-coded as `scene`, `identity`, `source`, or `style`.
-Their order is preserved exactly, while the prompt states what the generation
-should do with the two references. Each input currently accepts one image only
-(`B=1` in Comfy's `[B,H,W,C]` IMAGE format). For animated or batched input,
-select one frame first with `ImageFromBatch`.
+| Property | Exact value |
+|---|---|
+| Bytes | `4,302,295,014` |
+| SHA256 | `4500a4aad657e0d8e821607afe050b09931f84bf601ea1447ce2a52cca782e2f` |
+| Total tensors | `1,614` BF16 |
+| Integrated native tensors | `926` BF16 |
+| Routing mode | `competitive_text_slot_v1` |
+| Routing alpha | `1.0` |
+| Logical reference capacity | `2` |
+| Formal optimizer updates | `49,000` |
+| Formal epochs | `2` |
 
-Sampling begins from pure noise. Visual information enters through two VAE
-reference latent streams and the checkpoint's native V2 reference route, so
-there is intentionally **no denoise-strength widget**.
+The metadata field `anima_native_reference_version` is deliberately still
+`"2"`. “V4” is the project/release generation that adds competitive
+text-slot routing; it does not rename the underlying integrated V2 reference
+architecture. The loader validates the router config, all 926 native key names
+and shapes, file size, metadata, tensor counts, and BF16 dtypes. Optional full
+SHA256 verification reads the complete checkpoint once.
 
-## Requirements
+The final file is fully integrated: selecting the old V2 E180 file in the V4
+loader fails closed rather than silently constructing a wrong graph.
 
-- Current ComfyUI with Python 3.10 or newer;
-- NVIDIA CUDA GPU with BF16 support;
-- enough host RAM for the cached runtime;
-- the exact three release files listed below.
+## Required base assets
 
-The first release is deliberately strict: it validates the E180, Qwen, and VAE
-layouts instead of silently loading a similarly named but incompatible file.
-
-## Installation
-
-### 1. Install this custom node
-
-Copy the whole directory into:
-
-```text
-ComfyUI/custom_nodes/ComfyUI-Anima-Native-Reference/
-```
-
-Install its extra Python dependencies using the same interpreter that starts
-ComfyUI:
-
-```bash
-cd ComfyUI/custom_nodes/ComfyUI-Anima-Native-Reference
-python -m pip install -r requirements.txt
-```
-
-Do not replace a working ComfyUI CUDA build of `torch`/`torchvision`; this
-plugin's requirements intentionally do not pin or install PyTorch.
-
-Restart ComfyUI after installation.
-
-### 2. Place the three weight files
+Place:
 
 ```text
 ComfyUI/
 └── models/
     ├── diffusion_models/
-    │   └── anima-native-ref-v2-e180-step64080-256px.safetensors
+    │   └── anima-v4-scaled-mix-50-30-20-e2-step49000-256area.safetensors
     ├── text_encoders/
     │   └── qwen_3_06b_base.safetensors
     └── vae/
         └── qwen_image_vae.safetensors
 ```
 
-#### Integrated E180 checkpoint
+| File | Bytes | SHA256 |
+|---|---:|---|
+| `qwen_3_06b_base.safetensors` | `1,192,135,096` | `cd2a512003e2f9f3cd3c32a9c3573f820bb28c940f73c57b1ddaa983d9223eba` |
+| `qwen_image_vae.safetensors` | `253,806,246` | `a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f` |
 
-- File: [`anima-native-ref-v2-e180-step64080-256px.safetensors`](https://huggingface.co/LAXMAYDAY/NOOB2-Project-Character-Reference-Bypass-Injector-Research/blob/7f7269008a61db5db6d0d3d1f0cb4dcd03d65210/checkpoints/v2-e180/anima-native-ref-v2-e180-step64080-256px.safetensors)
-- Destination: `ComfyUI/models/diffusion_models/`
-- Bytes: `4,271,362,542`
-- SHA256: `1f970a7867dd7b65858d30b58135134ce84fd3b552ab27fc9f07e7f15209c6dd`
+The base assets are available from
+[`circlestone-labs/Anima`](https://huggingface.co/circlestone-labs/Anima).
+The only release path for the final V4 checkpoint is
+[`checkpoints/v4-scaled-49k/anima-v4-scaled-mix-50-30-20-e2-step49000-256area.safetensors`](https://huggingface.co/LAXMAYDAY/NOOB2-Project-Character-Reference-Bypass-Injector-Research/blob/main/checkpoints/v4-scaled-49k/anima-v4-scaled-mix-50-30-20-e2-step49000-256area.safetensors).
+The local ComfyUI filename is the same basename. This engineering working copy
+does not itself upload model weights.
 
-The repository is manually gated. Accept its access conditions and authenticate
-with Hugging Face before downloading. Keep access tokens outside scripts and
-workflow JSON files.
+Keep Hugging Face tokens outside workflow JSON, shell scripts, and the custom
+node directory.
 
-#### Anima text encoder
+## Why both Qwen and “neutral T5” appear
 
-- File: [`qwen_3_06b_base.safetensors`](https://huggingface.co/circlestone-labs/Anima/blob/main/split_files/text_encoders/qwen_3_06b_base.safetensors)
-- Destination: `ComfyUI/models/text_encoders/`
-- Bytes: `1,192,135,096`
-- SHA256: `cd2a512003e2f9f3cd3c32a9c3573f820bb28c940f73c57b1ddaa983d9223eba`
+No T5 encoder model is loaded.
 
-#### Qwen-Image VAE
+The standard text path is:
 
-- File: [`qwen_image_vae.safetensors`](https://huggingface.co/circlestone-labs/Anima/blob/main/split_files/vae/qwen_image_vae.safetensors)
-- Destination: `ComfyUI/models/vae/`
-- Bytes: `253,806,246`
-- SHA256: `a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f`
+1. the Qwen tokenizer creates Qwen input IDs and an attention mask;
+2. Qwen3-0.6B produces raw hidden states `[B,Lqwen,1024]`;
+3. the neutral-T5 **tokenizer only** creates target token IDs and a mask;
+4. the integrated DiT `llm_adapter` maps raw Qwen states onto that neutral-T5
+   token sequence for ordinary Anima cross-attention.
 
-The Anima base assets have their own license. Downloading or using them means
-you are responsible for following the upstream model terms.
+The V4 router additionally reads:
 
-## UI workflow
+- the positive prompt's raw Qwen hidden states;
+- the positive Qwen attention mask; and
+- boolean `reference_clause_masks` aligned to the raw Qwen token sequence.
 
-1. Drag `example_workflows/anima_ref_v2_e180.json` onto the ComfyUI canvas.
-2. Choose one image in each `Load Image` node.
-3. Confirm the loader has selected the exact E180, Qwen, and VAE filenames.
-4. Write an instruction that says how both references should influence the new
-   illustration.
-5. Queue the prompt.
+The runtime never pre-adapts and discards raw Qwen. That early-adaptation
+behavior belongs only to the legacy E180 runtime.
+
+## Canonical Image 1 / Image 2 clauses
+
+V4 competitive routing is instruction bound, not role hard-coded.
+
+The physical/logical mapping is explicit:
+
+```text
+one-ref slot-0 node:
+  one physical latent -> logical Image 1 / slot 0
+
+one-ref slot-1 node:
+  one physical latent -> logical Image 2 / slot 1
+
+two-ref node:
+  Reference Image 1 -> logical slot 0
+  Reference Image 2 -> logical slot 1
+```
+
+Neither slot permanently means scene, identity, pose, source, or style. The
+prompt clause says what should be taken from each slot.
+
+Safe defaults:
+
+```text
+Use Image 1 as the character identity reference. Generate a new illustration.
+```
+
+```text
+Use Image 2 as the character identity reference. Generate a new illustration.
+```
+
+```text
+Use the pose and composition from Image 1; use the character appearance from Image 2.
+```
+
+For alpha-positive V4 reference sampling, the prompt must:
+
+- mention every selected logical slot explicitly;
+- not mention a slot that is absent;
+- use a supported indexed form such as `Image 1`, `Image 2`, `Ref 1`,
+  `Ref 2`, `first image`, or `second image`;
+- preserve byte-exact canonical whitespace; and
+- keep the full bound clause inside the 512-token Qwen sequence.
+
+Ambiguous text such as `use both refs`, a dual request that only mentions
+Image 1, a slot-0 request that mentions Image 2, non-canonical leading/doubled
+whitespace, and truncated clauses fail before VAE encoding or denoising. The
+runtime never silently falls back to an unbound router.
+
+`reference_clause_masks` always have shape `[1,2,512]`, boolean dtype, and
+occupancy matching the selected logical slots.
+
+## One-reference carrier
+
+The one-reference node does not duplicate the input to satisfy a nominal
+two-reference interface.
+
+It sends:
+
+```text
+slot 0: reference_latents = [[one_real_latent]], reference_slot_ids = [[0]]
+slot 1: reference_latents = [[one_real_latent]], reference_slot_ids = [[1]]
+```
+
+The dual node sends:
+
+```text
+reference_latents = [[latent_image_1, latent_image_2]]
+reference_slot_ids = [[0, 1]]
+```
+
+All three cases use the audited
+`set_native_reference_fixed12ref_vectorized(True)` carrier. Duplicate slots,
+missing physical inputs, fabricated second latents, and the older generic
+carrier fail closed.
+
+## Reference preprocessing
+
+The one-reference node exposes:
+
+| Mode | Intended task | Geometry |
+|---|---|---|
+| `independent_reference` | character/reference generation | Preserves the reference aspect ratio, downsizes only above `reference_max_area`, then center-crops to the VAE × DiT patch multiple. |
+| `match_output_edit` | one-image edit | Uses `ImageOps.fit` to center-fit the source to the requested output width/height. |
+
+The two-reference node always uses independent preprocessing for both images.
+It does not infer semantic task type merely because one or two sockets happen
+to be connected.
+
+Both online and cached paths call the authoritative
+`strategy_anima.preprocess_anima_reference_image` helper. Reference-cache keys
+include preprocessing mode, output geometry, area limit, alignment multiple,
+VAE fingerprint, and final prepared pixels.
+
+## CFG contract
+
+At CFG `1.0`, one DiT forward is evaluated per denoising step.
+
+At any CFG value other than `1.0`, the standard positive and negative text
+paths remain different:
+
+- positive branch: positive raw Qwen + positive T5 IDs/masks;
+- negative branch: negative raw Qwen + negative T5 IDs/masks.
+
+Router-only conditioning is deliberately shared from the positive branch:
+
+- positive raw Qwen router context;
+- positive router attention mask; and
+- positive Image 1/Image 2 clause masks.
+
+This prevents the unconditional branch from losing the selected slot semantics
+while preserving normal negative-prompt CFG behavior.
+
+## Installation
+
+Requirements:
+
+- current ComfyUI with Python 3.10 or newer;
+- NVIDIA CUDA GPU with BF16 support;
+- enough GPU/host memory for Anima 2B, Qwen3-0.6B, and the VAE;
+- the exact files above.
+
+Copy this directory to:
+
+```text
+ComfyUI/custom_nodes/ComfyUI-Anima-Native-Reference/
+```
+
+Then use the same Python interpreter that launches ComfyUI:
+
+```bash
+cd ComfyUI/custom_nodes/ComfyUI-Anima-Native-Reference
+python -m pip install -r requirements.txt
+```
+
+Do not replace a working ComfyUI CUDA `torch`/`torchvision` build. The
+requirements intentionally do not install or pin PyTorch. They do directly
+declare both `toml>=0.10.2,<1` and `imagesize>=1.4.1,<2`; do not rely on those
+packages arriving accidentally through another custom node.
+
+Restart ComfyUI.
+
+## Example workflows
+
+UI-v1 drag-and-drop workflows:
+
+- [`example_workflows/anima_ref_v4_final_single_slot0.json`](example_workflows/anima_ref_v4_final_single_slot0.json)
+- [`example_workflows/anima_ref_v4_final_single_slot1.json`](example_workflows/anima_ref_v4_final_single_slot1.json)
+- [`example_workflows/anima_ref_v4_final_dual.json`](example_workflows/anima_ref_v4_final_dual.json)
+
+Comfy `/prompt` API graphs:
+
+- [`api_workflows/anima_ref_v4_final_single_slot0_api.json`](api_workflows/anima_ref_v4_final_single_slot0_api.json)
+- [`api_workflows/anima_ref_v4_final_single_slot1_api.json`](api_workflows/anima_ref_v4_final_single_slot1_api.json)
+- [`api_workflows/anima_ref_v4_final_dual_api.json`](api_workflows/anima_ref_v4_final_dual_api.json)
+
+The API and UI workflow formats are intentionally separate.
+
+All six published V4 workflows enable `verify_release_sha256` on the loader.
+This performs a full integrity check of the release checkpoint, Qwen, and VAE
+the first time that cached runtime is loaded. The loader node itself keeps the
+option disabled by default so intentional custom/local weights remain usable.
 
 Validated defaults:
 
 | Setting | Value |
 |---|---:|
 | Output size | `256 × 256` |
-| Steps | `40` |
-| CFG | `1.0` |
+| Steps | `30` |
+| CFG | `3.5` |
 | Flow shift | `5.0` |
 | Native reference scale | `1.0` |
-| Maximum area per reference | `65,536` pixels |
-| Logical slot IDs | `[0, 1]` |
+| Independent reference area limit | `65,536` pixels |
 | Attention mode | `torch` |
 
-The checkpoint was trained with 256-pixel-area buckets. Larger multiples of 16
-are accepted by the implementation, but should be treated as experimental
-rather than as a validated quality promise.
-
-### Prompt example
-
-```text
-Create a new anime illustration using both reference images. Preserve the
-relevant character and visual details from Reference Image 1 and Reference
-Image 2, and show the referenced character in a coherent new composition with
-clean anime rendering and detailed eyes.
-```
-
-Do not assume the example wording assigns a permanent role to either slot; edit
-the instruction for the actual pair and task.
-
-## API workflow
-
-`api_workflows/anima_ref_v2_e180_api.json` is in Comfy's API prompt format.
-For a local Comfy server:
-
-1. upload two images with `POST /upload/image`;
-2. replace `reference_image_1.png` and `reference_image_2.png` in the two
-   `LoadImage` nodes with the returned filenames;
-3. send the JSON object as `prompt` to `POST /prompt`;
-4. read the `SaveImage` result from history/output.
-
-Minimal request body:
-
-```json
-{
-  "prompt": { "...": "contents of anima_ref_v2_e180_api.json" },
-  "client_id": "your-client-id"
-}
-```
-
-The UI workflow and API workflow are intentionally separate formats.
+The final run trained at 256-resolution buckets. Larger multiples of 16 are
+accepted by the implementation but are not a validated quality promise.
 
 ## Memory modes and caching
 
 | Mode | Behavior |
 |---|---|
-| `balanced` | Default. Keeps the DiT on GPU; moves Qwen and VAE onto GPU only for their phases. |
-| `high_vram` | Keeps DiT, Qwen, and VAE on GPU for fastest repeated generation. |
-| `text_encoder_cpu` | Encodes text on CPU; slow fallback when GPU memory is constrained. |
+| `balanced` | Default. Keeps DiT on GPU and stages Qwen/VAE for their phases. |
+| `high_vram` | Keeps DiT, Qwen, and VAE on GPU for faster repeated generation. |
+| `text_encoder_cpu` | Encodes text on CPU as a low-VRAM, slower fallback. |
 
-Model loading has two cache layers:
+There are two model-cache layers:
 
-1. ComfyUI can cache the Loader node output;
-2. the plugin also keeps a process-level, thread-safe, strong-reference LRU of
-   the two most recently used runtimes.
+1. ComfyUI may cache the Loader output;
+2. the plugin maintains a thread-safe, strong-reference LRU for the two most
+   recently used V2/V4 runtime identities.
 
-Thus changing prompt, seed, reference image, or sampling settings does not read
-the 4.27 GB checkpoint again. Prompt embeddings and preprocessed reference
-latents also use bounded caches. The runtime serializes generation on one model
-instance so a request cannot leak scale or device state into another request.
+Prompt raw four-tensor encodings and reference VAE latents use bounded caches.
+Generation is serialized per runtime so mutable reference scale and device
+staging cannot leak between concurrent requests.
 
-## What was verified
+## Runtime integrity
 
-The packaged runtime was tested on an NVIDIA RTX PRO 6000 Blackwell using the
-exact release files:
+Before import, every vendored file is verified against
+`vendor/VENDOR_MANIFEST.json`. The authoritative V4 overlay hashes are
+recorded before the deterministic import-namespace transform.
 
-- full E180 + Qwen + VAE load completed;
-- output was CPU `float32 [1,256,256,3]`, finite, and in `[0,1]`;
-- 40-step reference generation completed with the validated settings;
-- the generated-only result for held-out case `000052` was **pixel-identical**
-  to the already accepted native CLI result when serialized with the same
-  conversion (`max difference = 0`, `nonzero pixels = 0`);
-- repeated loader calls returned the same cached runtime;
-- the output contains only the generated image, not an evaluation contact
-  sheet;
-- Chinese and Japanese prompts remain Unicode instead of being corrupted by
-  the historical CLI escape helper;
-- foreign custom-node modules named `library` or `networks` remain untouched
-  because all vendored imports use the private
-  `_anima_native_ref_vendor` namespace.
+`V4_IMPLEMENTATION_MANIFEST.json` records hashes for the production runtime,
+nodes, V4 workflows, documentation, vendor manifest, and tests. It contains no
+model weights or credentials.
 
-Timing observed on that one machine was approximately 12.3 seconds for the
-first full model load and 5.8 seconds for a 40-step 256×256 generation. These
-numbers are an integration record, not a speed guarantee for other hardware.
+Vendored imports exist only under:
+
+```text
+_anima_native_ref_vendor.library.*
+_anima_native_ref_vendor.networks.*
+```
+
+The runtime does not append the vendor tree to `sys.path` and does not claim,
+read, or overwrite generic top-level `library` or `networks` packages from
+other ComfyUI extensions.
+
+## CPU/mock verification
+
+The package's test suite verifies:
+
+- exact V4 metadata/config/count/dtype/key-shape validation and tamper failure;
+- availability of the vendored binding/router/text/fixed12/preprocessing code;
+- four-tensor raw Qwen + neutral-T5-token caching with Unicode;
+- canonical slot-0, slot-1, and dual clause masks;
+- ambiguous, wrong-slot, non-canonical, and missing-clause failure;
+- CFG negative ordinary text plus positive-router sharing;
+- one physical latent for one-ref slot 0/1 (no fake second);
+- independent and target-output geometry/cache isolation;
+- V2 class-ID compatibility;
+- UI-v1 link consistency and API graph wiring for all V4 cases; and
+- no denoise-strength input.
+
+Run:
+
+```bash
+python -m pytest -q
+python -m ruff check runtime.py nodes.py __init__.py tests tools
+python -m compileall -q .
+```
+
+Real CUDA acceptance matched the accepted standalone CLI for slot-0, slot-1,
+and dual cases at CFG `3.5`; CFG `1.0` was retained only as non-CFG regression
+coverage. A live dual-reference `/prompt` run also passed. See
+`TEST_REPORT.md`.
+
+## Legacy V2 E180 compatibility
+
+The following class IDs and files are unchanged:
+
+```text
+AnimaNativeRefV2Loader
+AnimaNativeRefV2Generate
+example_workflows/anima_ref_v2_e180.json
+api_workflows/anima_ref_v2_e180_api.json
+```
+
+Legacy E180:
+
+| Property | Value |
+|---|---|
+| File | `anima-native-ref-v2-e180-step64080-256px.safetensors` |
+| Bytes | `4,271,362,542` |
+| SHA256 | `1f970a7867dd7b65858d30b58135134ce84fd3b552ab27fc9f07e7f15209c6dd` |
+
+The V2 node remains exactly two-reference and uses its accepted legacy text
+and generic carrier path. Use the new V4 loader/nodes for the competitive
+router and one-reference slots.
 
 ## Limitations
 
-- fixed at exactly two reference inputs and one image per input (`B=1`);
-- publication runtime accepts the exact E180 release, not arbitrary Anima or
-  future V2 checkpoints;
-- CUDA BF16 only in the first release;
-- no stock Comfy `MODEL`/`CLIP`/`VAE` outputs and no stock KSampler path;
-- no dynamic N-reference frontend ports;
-- 256 is the trained/validated resolution; larger output remains experimental;
-- this is a research checkpoint and may still miss fine identity, pose, or
-  compositional details on difficult pairs.
+- Comfy batch size is currently fixed to one image/request (`B=1`);
+- V4 publication accepts the exact final checkpoint, not arbitrary router
+  experiments;
+- CUDA BF16 only;
+- no stock Comfy `MODEL`/`CLIP`/`VAE` outputs or stock KSampler;
+- no dynamic N-reference sockets beyond the checkpoint's two logical slots;
+- 256 is the trained/validated resolution;
+- difficult pairs can still miss fine identity, pose, text, or compositional
+  details;
+- a custom inference implementation is still required even though learned
+  weights are self-contained.
 
-## Why an inference plugin is still required
-
-"No external adapter" means there is only one integrated E180 model weight
-file. It does **not** mean unmodified stock Anima code knows the newly added
-V2 reference modules. This custom node supplies that inference implementation,
-but it does not load a second learned adapter or LoRA file.
-
-## Runtime provenance and licenses
-
-- V2 runtime source is pinned to the project snapshot corresponding to
-  `akatsuki-neo/anima-edit` commit
-  `2ae811d296ff4159c6024c4a86415d19961a388c`.
-- Vendored source/config files are integrity checked against
-  `vendor/VENDOR_MANIFEST.json` before use.
-- The Apache-2.0 license and upstream provenance are retained under `vendor/`.
-- Model weights are distributed separately and remain subject to their own
-  repository/model licenses and access conditions.
+“No external adapter” means the learned model is one integrated checkpoint. It
+does not mean unmodified upstream/stock Anima code knows the new competitive
+router, clause masks, or fixed-one/two carrier.
 
 ## 中文快速说明
 
-1. 把整个插件目录放进 `ComfyUI/custom_nodes/`，用 ComfyUI 自己的 Python
-   安装 `requirements.txt`，然后重启。
-2. E180 放 `models/diffusion_models/`，Qwen3 放 `models/text_encoders/`，VAE
-   放 `models/vae/`。
-3. 拖入 `example_workflows/anima_ref_v2_e180.json`，选择两张参考图并运行。
-4. `Reference Image 1/2` 仅表示有序槽位 `0/1`，**没有固定的场景图/身份图
-   角色**；怎样使用两张图由 prompt 指令决定。
-5. 这是从纯噪声开始的多参考生成，不是 i2i，所以没有去噪强度参数。
-6. E180 是单文件集成权重，不需要再外挂 LoRA/Adapter；但原版 Anima
-   推理代码不认识新增 V2 路径，因此仍需要本插件提供推理实现。
-
+1. 最终 V4 是单一自包含模型文件，不再外挂 LoRA、Adapter 或 IP-Adapter。
+2. 单参考节点可以把**唯一一张真实参考图**放到 `Image 1 / slot 0` 或
+   `Image 2 / slot 1`；不会复制一张假装成第二参考图。
+3. 双参考节点固定为 `Image 1 -> slot 0`、`Image 2 -> slot 1`，但槽位没有
+   固定“场景/人物/姿势/风格”语义，具体取什么由 prompt 的对应子句决定。
+4. prompt 必须明确、规范地写出所有正在使用的 `Image 1/Image 2`。缺槽、
+   错槽、`use both refs`、非规范空格或截断都会在去噪前报错，不静默降级。
+5. 文本路径是：Qwen 编码 raw hidden；neutral-T5 只负责 tokenizer IDs；
+   DiT 内部 LLM adapter 做普通文本条件；V4 router 另外读取正向 raw Qwen
+   和 `reference_clause_masks`。
+6. CFG 的 negative 分支仍用自己的 negative prompt 做普通文本条件，但
+   router 必须共享正向 prompt 的槽位子句。
+7. 单参考 `independent_reference` 用于角色/参考生图；
+   `match_output_edit` 用于把 edit 源图对齐到目标宽高。双参考始终独立保留
+   两张图的比例。
+8. 这是从纯噪声开始的 ref/edit 生成，不是 img2img，所以没有 denoise
+   strength。

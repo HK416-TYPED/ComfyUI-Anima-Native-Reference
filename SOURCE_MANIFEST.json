@@ -1,20 +1,9 @@
 {
-  "schema_version": 1,
-  "release": "v0.1.0-e180",
+  "schema_version": 2,
+  "release": "v0.2.0-v4-49k",
   "package": "ComfyUI-Anima-Native-Reference",
-  "model": {
-    "checkpoint": "anima-native-ref-v2-e180-step64080-256px.safetensors",
-    "checkpoint_sha256": "1f970a7867dd7b65858d30b58135134ce84fd3b552ab27fc9f07e7f15209c6dd",
-    "checkpoint_bytes": 4271362542,
-    "checkpoint_included": false
-  },
-  "excluded": [
-    "*.pyc",
-    ".git",
-    ".pytest_cache",
-    ".ruff_cache",
-    "__pycache__"
-  ],
+  "checkpoint_included": false,
+  "source_revision": "63767126fe2538489ac598033fc44187753cca74",
   "files": [
     {
       "path": "LICENSE",
@@ -23,28 +12,48 @@
     },
     {
       "path": "README.md",
-      "bytes": 10618,
-      "sha256": "4e8643500fe479006591128cbc3ea13644be7a88bc6460516703f7125f6d894c"
+      "bytes": 16061,
+      "sha256": "b5ade403128bdd17fe21944e9ecc3dae9f9476ec0504be1b59edc8fc475e3008"
     },
     {
       "path": "RUNTIME_API.md",
-      "bytes": 2817,
-      "sha256": "9eb314a3928205e8862e8fbf35c9e628841cc1c5e2ce0f9fa31921894aeac0b4"
+      "bytes": 4746,
+      "sha256": "6636fca165c253d21f2bcb737f5340f9119350ed6a18a6374663e14dd5fe0ee7"
     },
     {
       "path": "TEST_REPORT.md",
-      "bytes": 4804,
-      "sha256": "7b5cea16bccaa5e058c3af9b280f906a5abecb3f906cec13a8015fa95a99f200"
+      "bytes": 11187,
+      "sha256": "1b07bda60cef33d70509660f5704cfeeda29227d02735d89fc0ac7382a62b2ff"
+    },
+    {
+      "path": "V4_IMPLEMENTATION_MANIFEST.json",
+      "bytes": 6353,
+      "sha256": "433a226dc1058595d0ebbf6f4f5c04356e79ff8d5dab358a913f2abc8d40aa4c"
     },
     {
       "path": "__init__.py",
-      "bytes": 506,
-      "sha256": "2a3f5d4fc193f7e893b37e4bf261a2cc6ea6e0b046742b3dafb048c871c47f9e"
+      "bytes": 572,
+      "sha256": "43ad849504f9457b5d53f18b3d61a648d806749eabfcfa72bb68bde186d8cd96"
     },
     {
       "path": "api_workflows/anima_ref_v2_e180_api.json",
       "bytes": 2058,
       "sha256": "26cec56a93fd2cc9db16a1c0ac8555aaa9d19a4326eb14e515edea7b365253d0"
+    },
+    {
+      "path": "api_workflows/anima_ref_v4_final_dual_api.json",
+      "bytes": 1775,
+      "sha256": "fd321c0c9547aa64cc41ea5110b4be4e4302fe4fff27120ff7e44527655ee38e"
+    },
+    {
+      "path": "api_workflows/anima_ref_v4_final_single_slot0_api.json",
+      "bytes": 1635,
+      "sha256": "f9b75c99dbc54a479e31eea5997dc720448baa4e6d9ad8b916683b1f824ab6b4"
+    },
+    {
+      "path": "api_workflows/anima_ref_v4_final_single_slot1_api.json",
+      "bytes": 1635,
+      "sha256": "955d7ef75c99827d4c0baa383cb48e95a0bda7e49348f721094b7f101b8a1fc8"
     },
     {
       "path": "docs/INTEGRATION_REPORT.md",
@@ -58,8 +67,8 @@
     },
     {
       "path": "docs/evidence/pixel_comparison.json",
-      "bytes": 7140,
-      "sha256": "4cf6753668aeb0c40aa8b75d06d343c8a18704117f9bb16df7cdfffa8996e5c2"
+      "bytes": 7239,
+      "sha256": "0f7f9bd6449a34e15e150db1c218f0368dabfe0cda3adedc8044331d676835e3"
     },
     {
       "path": "docs/evidence/ui_v1_validation.json",
@@ -82,39 +91,79 @@
       "sha256": "5ed34f1805c6cca513591f673a12f51f9e77f553f86cd1dd2d82c5f5b55c6e76"
     },
     {
+      "path": "example_workflows/anima_ref_v4_final_dual.json",
+      "bytes": 10559,
+      "sha256": "e565ec6b0ee2ea27b9ace93297098881b5d00197b811baaae73295c563a8fb58"
+    },
+    {
+      "path": "example_workflows/anima_ref_v4_final_single_slot0.json",
+      "bytes": 10009,
+      "sha256": "87ccebb911fb75ccf68e92382c577544ca8c396e7334c5ae722862f3b1a7af60"
+    },
+    {
+      "path": "example_workflows/anima_ref_v4_final_single_slot1.json",
+      "bytes": 10009,
+      "sha256": "df773c7ccabb05024d4033950b832072af064af67369f2d0fd2816213c172fd3"
+    },
+    {
       "path": "nodes.py",
-      "bytes": 10906,
-      "sha256": "2e0550c7678aba023926d2b054c826087a5a72803ec0a226ff6bcd8243b6e1ad"
+      "bytes": 25558,
+      "sha256": "0efa7d2a663bcacd1a9666a24f0c3740bb4e3a00d62e0778d77d017cfefe92c3"
     },
     {
       "path": "requirements.txt",
-      "bytes": 390,
-      "sha256": "5d3949381e55f1c74319af74e5d34d1cb314188a24cd1107c18bd5de3eb1f193"
+      "bytes": 432,
+      "sha256": "357a613b85d49f96d792b658583d299022fb5ba3b49dfa48edac3d67209513de"
     },
     {
       "path": "runtime.py",
-      "bytes": 59512,
-      "sha256": "6d20a28c0e33cca2ffa62346fd11205db8f6ed38ee04deb98211a8a528aea680"
+      "bytes": 102347,
+      "sha256": "baeb099f507fd49321111501cca1073285068c944803f965653bfca170a57414"
     },
     {
       "path": "tests/test_nodes_and_workflows.py",
-      "bytes": 6336,
-      "sha256": "f04884eaa5b86df67e10102f36c8d95a1b8ad56e8ccc175cc657910164298a56"
+      "bytes": 13495,
+      "sha256": "6c119e2dca62cd895d9470202cddd2b54f9efa2cf0568302c96e8fa487124c18"
+    },
+    {
+      "path": "tests/test_requirements_contract.py",
+      "bytes": 888,
+      "sha256": "f0775b895caf7c6d5a35d9c7b783b9027759dcf53ad325cb89cc3d598be66c74"
     },
     {
       "path": "tests/test_runtime.py",
-      "bytes": 23206,
-      "sha256": "dc10c352b765fac1e1182a5b4775776a0771c4f1ee2fdb88d3968b6650bde305"
+      "bytes": 23450,
+      "sha256": "b5f8fd49f9399e69e38b5433cb1e1be548ab6ba57dc95d40658828f19f415b9e"
+    },
+    {
+      "path": "tests/test_runtime_v4.py",
+      "bytes": 23668,
+      "sha256": "17092d0fc62487d5a10930012b3d6dcb63195c58b754cb5cfb3cae83f89b8b10"
+    },
+    {
+      "path": "tools/build_v4_implementation_manifest.py",
+      "bytes": 5838,
+      "sha256": "53a0db5419cde6ad5b7c75bc10cb6632e1100aebe21cfa7a5e601ced01427e8d"
+    },
+    {
+      "path": "tools/build_v4_workflows.py",
+      "bytes": 20121,
+      "sha256": "145ff44f904eaede8be842f5449b117322cdeae7bcb024380b61123e9e4f7d0c"
+    },
+    {
+      "path": "tools/build_vendor_manifest.py",
+      "bytes": 4762,
+      "sha256": "177efd6ec820608957237b3ec01b77f46aa8ecb09d3abe6c2574614eb7b730d8"
     },
     {
       "path": "vendor/README.md",
-      "bytes": 1500,
-      "sha256": "004a4daf2d623394603621c6789a8b4bc8d890fe1bdf582e9d01d589811d0e0d"
+      "bytes": 2105,
+      "sha256": "1b53fbcd57f9317fd1d18ab24bf43eb74ca4649eaa881ac3b957726c79826854"
     },
     {
       "path": "vendor/VENDOR_MANIFEST.json",
-      "bytes": 18285,
-      "sha256": "74163ffb8ebb84746c4f676986bcc24a4860451b8ae4d233d6f3844733e6ff9a"
+      "bytes": 20448,
+      "sha256": "217b6ab2f3d81ac6136e1a2c16060e1ba47816783e8edd66394dbb2903f8afb6"
     },
     {
       "path": "vendor/anima_edit/LICENSE.md",
@@ -128,8 +177,8 @@
     },
     {
       "path": "vendor/anima_edit/anima_minimal_inference.py",
-      "bytes": 62672,
-      "sha256": "aebb80e1d55c8d72442dd6d3154dc81a9c62becbdd4d069a1bdaa0a7dfa45d7c"
+      "bytes": 64641,
+      "sha256": "9771379f8066106528f8b30508c05f01221f3f3433dbbdbeac1923407764e68d"
     },
     {
       "path": "vendor/anima_edit/configs/qwen3_06b/config.json",
@@ -183,8 +232,23 @@
     },
     {
       "path": "vendor/anima_edit/library/anima_models.py",
-      "bytes": 181508,
-      "sha256": "3df0893865a05cd1871735af0fd66ca815974b15fcbb14b056bcf789a47fdad6"
+      "bytes": 247121,
+      "sha256": "6fdf28f59c1e62b0ad61d14ecbd79bae0fbce94fd266490699cb0992a5c5e0c7"
+    },
+    {
+      "path": "vendor/anima_edit/library/anima_reference_binding.py",
+      "bytes": 17784,
+      "sha256": "db2bdc6aceca0fb3c2b6b39b804c9ed6285cb32cabcfe23fedd675193fea2c3b"
+    },
+    {
+      "path": "vendor/anima_edit/library/anima_reference_router.py",
+      "bytes": 18496,
+      "sha256": "0c4b3de0f578e7521ee74f5d8373a5006cbff046ebdabfa7e16787d006578613"
+    },
+    {
+      "path": "vendor/anima_edit/library/anima_text_conditioning.py",
+      "bytes": 12417,
+      "sha256": "8c9512c74fc174db7fda2cf9940cb55e0230b57ba43d5dadd049f1181e0f4ed8"
     },
     {
       "path": "vendor/anima_edit/library/anima_train_utils.py",
@@ -193,8 +257,8 @@
     },
     {
       "path": "vendor/anima_edit/library/anima_utils.py",
-      "bytes": 26205,
-      "sha256": "ccccc6bb33e69a3a07c09fc9bcf870dc23fb107c3674adf464e1aab987f76d85"
+      "bytes": 48889,
+      "sha256": "48344fe8b9236caa425c904a1a46bf1b9338fc5ec0e863467a21750b60050439"
     },
     {
       "path": "vendor/anima_edit/library/anima_vlm.py",
@@ -433,8 +497,8 @@
     },
     {
       "path": "vendor/anima_edit/library/strategy_anima.py",
-      "bytes": 20706,
-      "sha256": "6418a4dc9d8295d49163352d753dce862956afbee91f311e86f7b1a33ed99c38"
+      "bytes": 28078,
+      "sha256": "677241157c2116ac7a8287ba36f4866e8d4f551a76aab3ecb4f056d7fe7eb937"
     },
     {
       "path": "vendor/anima_edit/library/strategy_base.py",
@@ -473,8 +537,8 @@
     },
     {
       "path": "vendor/anima_edit/library/train_util.py",
-      "bytes": 328866,
-      "sha256": "68a7c6b7ff6eeec93392ddae253c9447423316aac96e854ee1477f1145e169a5"
+      "bytes": 361156,
+      "sha256": "546dc67f15f4a80c474bd3d98bd40345752ff2abfa08dd40dfab31e5eb07b79e"
     },
     {
       "path": "vendor/anima_edit/library/utils.py",

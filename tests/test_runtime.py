@@ -29,7 +29,8 @@ def test_vendored_runtime_manifest_and_hashes_are_pinned():
         (PACKAGE_ROOT / "vendor" / "VENDOR_MANIFEST.json").read_text(encoding="utf-8")
     )
     assert manifest["import_namespace"] == "_anima_native_ref_vendor"
-    assert manifest["file_count"] == 107
+    assert manifest["source_overlay"] == rtmod.VENDORED_ANIMA_OVERLAY
+    assert manifest["file_count"] == 110
     assert len(manifest["vendored_tree_sha256"]) == 64
 
 
@@ -55,7 +56,7 @@ def test_vendored_python_imports_use_only_private_namespace():
                 if node.module.startswith("_anima_native_ref_vendor."):
                     internal_imports.append(node.module)
                 assert node.module.split(".", 1)[0] not in {"library", "networks"}
-    assert len(internal_imports) == 207
+    assert len(internal_imports) == 210
 
 
 def test_loader_preserves_sys_path_and_foreign_generic_packages(tmp_path, monkeypatch):
@@ -65,6 +66,10 @@ def test_loader_preserves_sys_path_and_foreign_generic_packages(tmp_path, monkey
         "library/__init__.py",
         "library/anima_utils.py",
         "library/anima_models.py",
+        "library/anima_reference_binding.py",
+        "library/anima_reference_router.py",
+        "library/anima_text_conditioning.py",
+        "library/strategy_anima.py",
         "library/hunyuan_image_utils.py",
         "library/qwen_image_autoencoder_kl.py",
         "configs/qwen3_06b/config.json",

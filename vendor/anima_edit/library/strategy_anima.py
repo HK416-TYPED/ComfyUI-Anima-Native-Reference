@@ -5,6 +5,7 @@ import os
 import random
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -12,6 +13,12 @@ import torch
 from PIL import Image, ImageOps
 
 from _anima_native_ref_vendor.library import anima_utils, train_util
+from _anima_native_ref_vendor.library.anima_reference_binding import (
+    BindingStatus,
+    SpanAlignmentError,
+    build_slot_clause_token_masks,
+    parse_reference_bindings,
+)
 from _anima_native_ref_vendor.library.strategy_base import LatentsCachingStrategy, TextEncodingStrategy, TokenizeStrategy, TextEncoderOutputsCachingStrategy
 from _anima_native_ref_vendor.library import qwen_image_autoencoder_kl
 
@@ -21,6 +28,25 @@ setup_logging()
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class AnimaReferenceClauseMaskBatch:
+    """Token-aligned logical-reference clauses for one caption batch.
+
+    ``clause_masks`` is always a dense boolean tensor with shape
+    ``[batch, max_slots, qwen_sequence_length]``. A row which is ambiguous,
+    invalid, non-canonical, or truncated remains all-false and is explicitly
+    marked by ``binding_valid=False``; callers must never treat such a row as
+    pointer supervision. V4 A1 currently consumes these masks only in its
+    ordinary rectified-flow objective (N/X rows), not as P/T/S target labels.
+    """
+
+    clause_masks: torch.Tensor
+    binding_valid: torch.Tensor
+    statuses: Tuple[str, ...]
+    reasons: Tuple[str, ...]
+    canonical_instructions: Tuple[str, ...]
 
 
 def preprocess_anima_reference_image(
@@ -125,6 +151,148 @@ class AnimaTokenizeStrategy(TokenizeStrategy):
         t5_input_ids = t5_encoding["input_ids"]
         t5_attn_mask = t5_encoding["attention_mask"]
         return [qwen3_input_ids, qwen3_attn_mask, t5_input_ids, t5_attn_mask]
+
+    def tokenize_reference_clause_masks(
+        self,
+        text: Union[str, List[str]],
+        expected_slot_ids_per_sample,
+        *,
+        max_slots: Optional[int] = None,
+        require_canonical: bool = True,
+    ) -> AnimaReferenceClauseMaskBatch:
+        """Build dense logical-slot clause masks with the Qwen tokenization.
+
+        The tokenizer options intentionally mirror :meth:`tokenize` exactly and
+        merely request ``offset_mapping`` in addition. Binding spans are defined
+        over canonical text. Therefore a non-canonical caption is rejected by
+        default rather than silently producing masks which do not align with the
+        prompt embeddings already present in the training batch.
+
+        AMBIGUOUS/INVALID/truncated rows are represented by all-false masks and
+        ``binding_valid=False``. This fail-soft representation is useful for
+        generic generation, but it is *not* permission to use those rows as
+        pointer/binding supervision.
+        """
+
+        texts = [text] if isinstance(text, str) else list(text)
+        if torch.is_tensor(expected_slot_ids_per_sample):
+            expected_slot_ids_per_sample = expected_slot_ids_per_sample.detach().cpu().tolist()
+        expected_rows = list(expected_slot_ids_per_sample)
+        if len(texts) != len(expected_rows):
+            raise ValueError(
+                "caption batch and expected_slot_ids_per_sample must have the same length: "
+                f"{len(texts)} != {len(expected_rows)}"
+            )
+
+        normalized_expected: List[Tuple[int, ...]] = []
+        greatest_slot = -1
+        for row in expected_rows:
+            if torch.is_tensor(row):
+                row = row.detach().cpu().tolist()
+            slots = tuple(int(slot_id) for slot_id in (row or []))
+            normalized_expected.append(slots)
+            if slots:
+                greatest_slot = max(greatest_slot, max(slots))
+
+        if max_slots is None:
+            max_slots = greatest_slot + 1
+        max_slots = int(max_slots)
+        if max_slots <= 0:
+            raise ValueError(f"max_slots must be positive, got {max_slots}")
+
+        try:
+            encoding = self.qwen3_tokenizer(
+                texts,
+                return_tensors="pt",
+                truncation=True,
+                padding="max_length",
+                max_length=self.qwen3_max_length,
+                return_offsets_mapping=True,
+            )
+        except (NotImplementedError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "Anima V4 text-slot routing requires a fast Qwen tokenizer with "
+                "return_offsets_mapping support."
+            ) from exc
+        if "offset_mapping" not in encoding:
+            raise RuntimeError(
+                "Anima V4 text-slot routing tokenizer did not return offset_mapping."
+            )
+        if "attention_mask" not in encoding:
+            raise RuntimeError("Qwen tokenizer did not return attention_mask.")
+
+        offsets = torch.as_tensor(encoding["offset_mapping"], dtype=torch.long)
+        attention = torch.as_tensor(encoding["attention_mask"], dtype=torch.bool)
+        if offsets.ndim != 3 or offsets.shape[-1] != 2:
+            raise ValueError(f"offset_mapping must have shape [B,L,2], got {tuple(offsets.shape)}")
+        if attention.ndim != 2 or tuple(attention.shape) != tuple(offsets.shape[:2]):
+            raise ValueError(
+                "attention_mask must have shape [B,L] matching offset_mapping, got "
+                f"{tuple(attention.shape)} vs {tuple(offsets.shape)}"
+            )
+        if offsets.shape[0] != len(texts):
+            raise ValueError("tokenizer returned the wrong batch size for clause masks")
+
+        clause_masks = torch.zeros(
+            (len(texts), max_slots, offsets.shape[1]), dtype=torch.bool
+        )
+        binding_valid = torch.zeros(len(texts), dtype=torch.bool)
+        statuses: List[str] = []
+        reasons: List[str] = []
+        canonical_instructions: List[str] = []
+
+        for sample_index, (caption, expected_slots) in enumerate(
+            zip(texts, normalized_expected, strict=True)
+        ):
+            parsed = parse_reference_bindings(
+                caption, expected_slot_ids=expected_slots
+            )
+            canonical_instructions.append(parsed.canonical_instruction)
+
+            if require_canonical and caption != parsed.canonical_instruction:
+                statuses.append(BindingStatus.INVALID.value)
+                reasons.append("noncanonical_instruction")
+                continue
+            if any(slot_id >= max_slots for slot_id in expected_slots):
+                statuses.append(BindingStatus.INVALID.value)
+                reasons.append("expected_slot_exceeds_max_slots")
+                continue
+            if not parsed.binding_valid:
+                statuses.append(parsed.status.value)
+                reasons.append(parsed.reason)
+                continue
+
+            try:
+                slot_masks = build_slot_clause_token_masks(
+                    parsed,
+                    offsets[sample_index].tolist(),
+                    attention_mask=attention[sample_index].tolist(),
+                )
+            except SpanAlignmentError as exc:
+                statuses.append(BindingStatus.INVALID.value)
+                reasons.append(f"token_alignment_error:{exc}")
+                continue
+
+            for slot_id, mask in slot_masks.items():
+                clause_masks[sample_index, int(slot_id)] = torch.as_tensor(
+                    mask, dtype=torch.bool
+                )
+            binding_valid[sample_index] = True
+            statuses.append(BindingStatus.SAFE.value)
+            reasons.append(parsed.reason)
+
+        return AnimaReferenceClauseMaskBatch(
+            clause_masks=clause_masks,
+            binding_valid=binding_valid,
+            statuses=tuple(statuses),
+            reasons=tuple(reasons),
+            canonical_instructions=tuple(canonical_instructions),
+        )
+
+    # Naming alias retained for callers/tests which describe the operation as a
+    # builder rather than a tokenizer. There is one implementation and one
+    # offset-mapping contract.
+    build_reference_clause_masks = tokenize_reference_clause_masks
 
 
 class AnimaTextEncodingStrategy(TextEncodingStrategy):
@@ -383,7 +551,11 @@ class AnimaLatentsCachingStrategy(LatentsCachingStrategy):
             pending.append([None] * len(paths))
 
             target_size_hw = None
-            if self.sync_single_reference_geometry and len(paths) == 1:
+            if (
+                self.sync_single_reference_geometry
+                and len(paths) == 1
+                and getattr(info, "anima_task_type", None) != "character_1ref"
+            ):
                 bucket_reso = getattr(info, "bucket_reso", None)
                 if bucket_reso is None:
                     raise ValueError(f"Missing bucket_reso for synchronized reference: {info.absolute_path}")
