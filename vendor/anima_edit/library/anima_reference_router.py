@@ -18,6 +18,8 @@ from typing import Optional
 import torch
 from torch import nn
 
+from _anima_native_ref_vendor.library.anima_reference_attributes import REFERENCE_ATTRIBUTE_VOCAB
+
 
 def _check_bool_mask(mask: torch.Tensor, shape: tuple[int, ...], name: str) -> None:
     if mask.dtype != torch.bool:
@@ -320,8 +322,9 @@ class CompetitiveReferenceRouter(nn.Module):
         logits = logits / float(temperature)
         if not null_enabled:
             # No-reference inputs are hard-bypassed by Anima before reaching
-            # this module.  With references present, disabling null is a safe
-            # A1 curriculum operation and cannot create an all-masked row.
+            # this module. With references present, disabling null is a safe
+            # router-initialization schedule operation and cannot create an
+            # all-masked row.
             if not bool(slot_valid.any(dim=-1).all()):
                 raise ValueError("null may be disabled only when every sample has a valid reference.")
             logits = logits.clone()
@@ -348,6 +351,272 @@ def zero_init_linear(
     if layer.bias is not None:
         nn.init.zeros_(layer.bias)
     return layer
+
+
+class AbsoluteImageIndexConditioner(nn.Module):
+    """Map a fixed sinusoidal logical image index into visual/router deltas.
+
+    The index is structural, not semantic: index 0 does not mean "source" and
+    index 1 does not mean "identity".  Both learned projections are zero
+    initialized, which makes materializing this module an exact compatibility
+    operation for an existing checkpoint while preserving first-step gradient
+    flow into the new projections.
+
+    ``slot_ids`` may have any shape and contains zero-based logical indices;
+    ``-1`` denotes padding and produces literal zero outputs.
+    """
+
+    version = "absolute_image_index_sincos_v1"
+
+    def __init__(
+        self,
+        model_dim: int,
+        router_dim: int,
+        *,
+        index_dim: int = 64,
+        max_period: float = 10_000.0,
+    ) -> None:
+        super().__init__()
+        if model_dim <= 0 or router_dim <= 0:
+            raise ValueError("model_dim and router_dim must be positive.")
+        if index_dim <= 0 or index_dim % 2:
+            raise ValueError("index_dim must be a positive even integer.")
+        if not math.isfinite(float(max_period)) or float(max_period) <= 1.0:
+            raise ValueError("max_period must be finite and greater than one.")
+
+        self.model_dim = int(model_dim)
+        self.router_dim = int(router_dim)
+        self.index_dim = int(index_dim)
+        self.max_period = float(max_period)
+        self.visual_proj = zero_init_linear(index_dim, model_dim, bias=False)
+        self.router_proj = zero_init_linear(index_dim, router_dim, bias=False)
+
+    def fixed_encoding(
+        self,
+        slot_ids: torch.Tensor,
+        *,
+        dtype: Optional[torch.dtype] = None,
+    ) -> torch.Tensor:
+        if not isinstance(slot_ids, torch.Tensor):
+            raise TypeError("slot_ids must be a tensor.")
+        if slot_ids.dtype == torch.bool or slot_ids.is_floating_point():
+            raise TypeError("slot_ids must have an integer dtype.")
+        if bool((slot_ids < -1).any()):
+            raise ValueError("slot_ids may contain only non-negative IDs or -1 padding.")
+
+        output_dtype = dtype or self.visual_proj.weight.dtype
+        half = self.index_dim // 2
+        frequencies = torch.exp(
+            -math.log(self.max_period)
+            * torch.arange(half, device=slot_ids.device, dtype=torch.float32)
+            / float(half)
+        )
+        # Reserve the all-zero position for padding by encoding slot n at n+1.
+        positions = (slot_ids.to(torch.float32) + 1.0).clamp_min(0.0)
+        phases = positions.unsqueeze(-1) * frequencies
+        encoding = torch.cat((torch.sin(phases), torch.cos(phases)), dim=-1)
+        encoding = encoding * (slot_ids >= 0).unsqueeze(-1).to(encoding.dtype)
+        return encoding.to(dtype=output_dtype)
+
+    def forward(self, slot_ids: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        encoding = self.fixed_encoding(slot_ids, dtype=self.visual_proj.weight.dtype)
+        return self.visual_proj(encoding), self.router_proj(encoding)
+
+
+class NativeReferenceContextConditioner(nn.Module):
+    """Encode *structural* image context without manufacturing prompt text.
+
+    ``logical_slot_ids`` identify image instances and ``source_rows`` marks the
+    one spatially aligned edit canvas, when present.  Neither input assigns a
+    semantic attribute such as identity, pose, style, or background.  Those
+    decisions are left to the full user instruction and the visual/target
+    features consumed by :class:`CompetitiveReferenceRouter`.
+
+    The instance branch is the same fixed-sinusoid/zero-projection design used
+    by :class:`AbsoluteImageIndexConditioner`.  The role projections consume a
+    literal two-way one-hot ``[generic_reference, aligned_source]``.  All four
+    learned outputs are zero initialized, so adding this module to an existing
+    checkpoint is exactly neutral.  A V6 warm start may explicitly copy its
+    trained index projections into ``instance_conditioner``; the obsolete
+    text-only attribute classifier is intentionally not part of this module.
+
+    Padding uses ``slot_id=-1`` and must have ``source_rows=False``.  It returns
+    a visual-token delta ``[..., model_dim]`` and a router context
+    ``[..., router_dim]`` with exact zeros on padded rows.
+    """
+
+    version = "native_reference_context_v1"
+
+    def __init__(
+        self,
+        model_dim: int,
+        router_dim: int,
+        *,
+        index_dim: int = 64,
+    ) -> None:
+        super().__init__()
+        if model_dim <= 0 or router_dim <= 0:
+            raise ValueError("model_dim and router_dim must be positive.")
+        self.model_dim = int(model_dim)
+        self.router_dim = int(router_dim)
+        self.index_dim = int(index_dim)
+        self.instance_conditioner = AbsoluteImageIndexConditioner(
+            model_dim=model_dim,
+            router_dim=router_dim,
+            index_dim=index_dim,
+        )
+        self.role_visual_proj = zero_init_linear(2, model_dim, bias=False)
+        self.role_router_proj = zero_init_linear(2, router_dim, bias=False)
+
+    def forward(
+        self,
+        logical_slot_ids: torch.Tensor,
+        source_rows: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if not isinstance(logical_slot_ids, torch.Tensor):
+            raise TypeError("logical_slot_ids must be a tensor.")
+        if logical_slot_ids.dtype == torch.bool or logical_slot_ids.is_floating_point():
+            raise TypeError("logical_slot_ids must have an integer dtype.")
+        if source_rows.dtype != torch.bool or tuple(source_rows.shape) != tuple(
+            logical_slot_ids.shape
+        ):
+            raise ValueError("source_rows must be bool and match logical_slot_ids.")
+        if bool((logical_slot_ids < -1).any()):
+            raise ValueError("logical_slot_ids may contain only non-negative IDs or -1 padding.")
+        valid = logical_slot_ids >= 0
+        if bool((source_rows & ~valid).any()):
+            raise ValueError("A padded reference row cannot be marked as an aligned source.")
+
+        visual, router = self.instance_conditioner(logical_slot_ids)
+        role_dtype = self.role_visual_proj.weight.dtype
+        # Role 0 is an ordinary reference; role 1 is the serving-time-known,
+        # spatially aligned source canvas.  The one-hot is structural metadata,
+        # not a learned or prompt-derived mask.
+        role_ids = source_rows.to(dtype=torch.long)
+        role = torch.nn.functional.one_hot(role_ids, num_classes=2).to(
+            device=logical_slot_ids.device,
+            dtype=role_dtype,
+        )
+        role = role * valid.unsqueeze(-1).to(role_dtype)
+        visual = visual + self.role_visual_proj(role).to(visual.dtype)
+        router = router + self.role_router_proj(role).to(router.dtype)
+        return visual, router
+
+
+class TextSlotAttributeRouter(nn.Module):
+    """Predict prompt-requested attributes for every logical image slot.
+
+    All projections are shared over the slot axis.  The only slot-specific
+    input is the externally audited clause mask, so physical order cannot bake
+    in a source/identity role.  Attribute logits remain trainable immediately;
+    the final route projection is zero initialized so adding the module to an
+    existing V4 checkpoint is output-neutral at step zero.
+    """
+
+    version = "text_slot_attribute_router_v1"
+
+    def __init__(
+        self,
+        text_dim: int,
+        router_dim: int,
+        *,
+        hidden_dim: int = 256,
+        attribute_vocab: tuple[str, ...] = REFERENCE_ATTRIBUTE_VOCAB,
+    ) -> None:
+        super().__init__()
+        if text_dim <= 0 or router_dim <= 0 or hidden_dim <= 0:
+            raise ValueError("text_dim, router_dim, and hidden_dim must be positive.")
+        if not attribute_vocab or len(set(attribute_vocab)) != len(attribute_vocab):
+            raise ValueError("attribute_vocab must be non-empty and unique.")
+
+        self.text_dim = int(text_dim)
+        self.router_dim = int(router_dim)
+        self.hidden_dim = int(hidden_dim)
+        self.attribute_vocab = tuple(attribute_vocab)
+        self.num_attributes = len(self.attribute_vocab)
+
+        self.text_norm = nn.LayerNorm(text_dim, elementwise_affine=False)
+        self.text_proj = nn.Linear(text_dim, hidden_dim, bias=False)
+        self.attribute_classifier = nn.Linear(hidden_dim, self.num_attributes, bias=True)
+        self.attribute_embeddings = nn.Parameter(
+            torch.empty(self.num_attributes, hidden_dim)
+        )
+        self.route_proj = zero_init_linear(hidden_dim, router_dim, bias=False)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        nn.init.xavier_uniform_(self.text_proj.weight)
+        nn.init.xavier_uniform_(self.attribute_classifier.weight)
+        nn.init.zeros_(self.attribute_classifier.bias)
+        nn.init.normal_(
+            self.attribute_embeddings,
+            mean=0.0,
+            std=self.hidden_dim**-0.5,
+        )
+        nn.init.zeros_(self.route_proj.weight)
+
+    def forward(
+        self,
+        raw_hidden: torch.Tensor,
+        clause_masks: torch.Tensor,
+        *,
+        token_valid: Optional[torch.Tensor] = None,
+        slot_valid: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return ``(route_context, attribute_logits, prediction_valid)``.
+
+        Shapes are ``raw_hidden=[B,L,D]``, ``clause_masks=[B,S,L]``, route
+        context ``[B,S,R]``, logits ``[B,S,A]``, and validity ``[B,S]``.
+        Missing/invalid clauses return exact zeros and never enter auxiliary
+        BCE when callers intersect ``prediction_valid`` with audited labels.
+        """
+
+        if raw_hidden.ndim != 3:
+            raise ValueError("raw_hidden must have shape [B,L,D].")
+        batch, length, width = raw_hidden.shape
+        if width != self.text_dim:
+            raise ValueError(
+                f"raw_hidden width must be {self.text_dim}, got {width}."
+            )
+        if clause_masks.ndim != 3:
+            raise ValueError("clause_masks must have shape [B,S,L].")
+        slots = clause_masks.shape[1]
+        _check_bool_mask(clause_masks, (batch, slots, length), "clause_masks")
+
+        if token_valid is None:
+            token_valid = torch.ones(
+                (batch, length), dtype=torch.bool, device=raw_hidden.device
+            )
+        else:
+            _check_bool_mask(token_valid, (batch, length), "token_valid")
+            token_valid = token_valid.to(device=raw_hidden.device)
+        if slot_valid is None:
+            slot_valid = torch.ones(
+                (batch, slots), dtype=torch.bool, device=raw_hidden.device
+            )
+        else:
+            _check_bool_mask(slot_valid, (batch, slots), "slot_valid")
+            slot_valid = slot_valid.to(device=raw_hidden.device)
+
+        select = clause_masks.to(device=raw_hidden.device) & token_valid[:, None, :]
+        prediction_valid = select.any(dim=-1) & slot_valid
+        weights = select.to(raw_hidden.dtype)
+        denominator = weights.sum(dim=-1, keepdim=True).clamp_min(1.0)
+        pooled = torch.einsum(
+            "bsl,bld->bsd", weights, self.text_norm(raw_hidden)
+        ) / denominator
+        hidden = torch.nn.functional.silu(self.text_proj(pooled))
+        logits = self.attribute_classifier(hidden)
+        probabilities = torch.sigmoid(logits)
+        attribute_context = torch.einsum(
+            "bsa,ah->bsh", probabilities, self.attribute_embeddings
+        ) / float(self.num_attributes)
+        route_context = self.route_proj(attribute_context)
+
+        valid_f = prediction_valid.unsqueeze(-1)
+        route_context = torch.where(valid_f, route_context, torch.zeros_like(route_context))
+        logits = torch.where(valid_f, logits, torch.zeros_like(logits))
+        return route_context, logits, prediction_valid
 
 
 class ZeroInitQueryCorrection(nn.Module):
@@ -423,7 +692,9 @@ class ZeroInitQueryCorrection(nn.Module):
 __all__ = [
     "SlotClausePooler",
     "CompetitiveReferenceRouter",
+    "AbsoluteImageIndexConditioner",
+    "NativeReferenceContextConditioner",
+    "TextSlotAttributeRouter",
     "ZeroInitQueryCorrection",
     "zero_init_linear",
 ]
-

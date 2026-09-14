@@ -1,0 +1,254 @@
+{
+  "schema": "anima-native-context-v7-comfy-release/v2",
+  "package_version": "7.0.2",
+  "release_id": "v7-native-context-512-e4",
+  "architecture": "native_context_v1",
+  "checkpoint_layout": "integrated_single_checkpoint",
+  "checkpoint": {
+    "filename": "anima-native-context-v7-512-e4.safetensors",
+    "repo_path": "checkpoints/v7-native-context-512-e4/anima-native-context-v7-512-e4.safetensors",
+    "bytes": 4303082816,
+    "sha256": "f8407d44ecea51d14a779756df326b143a29b12867743b6fc7afdd82f2a6e091",
+    "training_stage": "512 cumulative epoch 4 final"
+  },
+  "prompt_contract": "exact_user_prompt_no_hidden_reference_rewrite",
+  "public_nodes": [
+    "AnimaNativeContextV7Loader",
+    "AnimaNativeContextV7T2I",
+    "AnimaNativeContextV7SingleReference",
+    "AnimaNativeContextV7MultiReference",
+    "AnimaNativeContextV7Edit"
+  ],
+  "inference_inputs": {
+    "runtime_mask": false,
+    "logical_slot_selector": false,
+    "external_adapter_or_lora": false,
+    "node_default_prompt": "",
+    "default_width": 512,
+    "default_height": 512,
+    "default_reference_max_area": 262144
+  },
+  "hotfix": {
+    "replaces_package_version": "7.0.1",
+    "root_cause": "NativeContextRuntimePrimitives state-free helpers missing staticmethod binding",
+    "full_directory_replacement_required": true,
+    "checkpoint_changed": false,
+    "real_comfy_api_tested": true
+  },
+  "validator_policy": "architecture-and-contract fail-closed; equivalent saver metadata accepted",
+  "vendored_source_commit": "2ae811d296ff4159c6024c4a86415d19961a388c",
+  "vendored_overlay": "v7-native-context-20260810+512-release-compat-20260820+comfy-hotfix-20260823",
+  "file_count": 42,
+  "files": [
+    {
+      "path": "README.md",
+      "size": 4002,
+      "sha256": "e555faaf7dc1221a9cc4c20dfef4f80f287a2a4a30a9a31024121455107b0660"
+    },
+    {
+      "path": "RUNTIME_API.md",
+      "size": 714,
+      "sha256": "94ae382957b549777080f0f0ec18f358af1d21e29658e0559723f8ef3b9c925f"
+    },
+    {
+      "path": "__init__.py",
+      "size": 220,
+      "sha256": "a2ca010560709f7c42bd6f841fd17fe787739e33582947978d95d3eac008dfbc"
+    },
+    {
+      "path": "_runtime_common.py",
+      "size": 37794,
+      "sha256": "62890b56c62b558af2350806ea9986794a79474ec22cfa685e57ca0b3cb8b7e7"
+    },
+    {
+      "path": "api_workflows/anima_v7_native_context_edit_api.json",
+      "size": 1494,
+      "sha256": "9fffcab286dfe538bc8adf103ee4983807f26b1e90842c7e0fd6c45f6644fd10"
+    },
+    {
+      "path": "api_workflows/anima_v7_native_context_multi_ref_api.json",
+      "size": 1840,
+      "sha256": "588b96ecf11e241ee378548c56b54e0b0629542543374fdad13800b97597dbff"
+    },
+    {
+      "path": "api_workflows/anima_v7_native_context_single_ref_api.json",
+      "size": 1580,
+      "sha256": "dbd5be2bdb109f61c8c6f31f79b1737e5c3f2f9ba54f7e05e95c6e6fb079ccb5"
+    },
+    {
+      "path": "api_workflows/anima_v7_native_context_t2i_api.json",
+      "size": 1215,
+      "sha256": "45ea0935634edebf254e24865722709b76ea5843e4785aa61fc9f0623ad876f5"
+    },
+    {
+      "path": "example_workflows/anima_v7_native_context_edit.json",
+      "size": 8909,
+      "sha256": "5a60d1bc10c7a7779103bc034c6e40db78885a62f0ca63e873808c6db0432eed"
+    },
+    {
+      "path": "example_workflows/anima_v7_native_context_multi_ref.json",
+      "size": 10236,
+      "sha256": "7151339f7e7ee618668d99a05d858be5ea81b7aea07185e32579d37dc602c2dc"
+    },
+    {
+      "path": "example_workflows/anima_v7_native_context_single_ref.json",
+      "size": 9173,
+      "sha256": "6e30de4f94d89e5b6824a3a3d96502d6666cdb129510b97380f099429c5acd40"
+    },
+    {
+      "path": "example_workflows/anima_v7_native_context_t2i.json",
+      "size": 7600,
+      "sha256": "d6b42ea488bbff021012eca746a7f1598e12b186970c8c64affa7c6a843e40ac"
+    },
+    {
+      "path": "nodes.py",
+      "size": 13394,
+      "sha256": "1337f68842b51f99ea7d23d9594d70cec9fb4f5f97000510025920ac99371af6"
+    },
+    {
+      "path": "requirements.txt",
+      "size": 143,
+      "sha256": "a2b110e31d1c47d03d32a8930fe4458e8e430645c6d4543c534a4b63d3d9d288"
+    },
+    {
+      "path": "runtime.py",
+      "size": 35166,
+      "sha256": "99b4c2f20524f303310b91839c32ab312df69d6b8d4d972182858258ad66d5bd"
+    },
+    {
+      "path": "vendor/VENDOR_MANIFEST.json",
+      "size": 4407,
+      "sha256": "15e387411f94c8c111dd4326512d811b8b2f66f930a45114bfe18f32dddc5846"
+    },
+    {
+      "path": "vendor/anima_edit/LICENSE.md",
+      "size": 11342,
+      "sha256": "e8d3af270e7b15ccab908481e4a8b2da03b27cc7ada3c9826cf709df5eb49c9e"
+    },
+    {
+      "path": "vendor/anima_edit/__init__.py",
+      "size": 153,
+      "sha256": "b199bf7fc58d64d479a68d25cf1d186033145d2d63e2e25db5ddf88b4c7aa817"
+    },
+    {
+      "path": "vendor/anima_edit/configs/qwen3_06b/config.json",
+      "size": 727,
+      "sha256": "504a6b58c4271583724e66584b6b7698aea18450209df6b2f7582df0e89cee59"
+    },
+    {
+      "path": "vendor/anima_edit/configs/qwen3_06b/merges.txt",
+      "size": 1671853,
+      "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5"
+    },
+    {
+      "path": "vendor/anima_edit/configs/qwen3_06b/tokenizer.json",
+      "size": 7031645,
+      "sha256": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539"
+    },
+    {
+      "path": "vendor/anima_edit/configs/qwen3_06b/tokenizer_config.json",
+      "size": 9678,
+      "sha256": "3c04ed3ca964ea2f6b2b5faf0dc4d31aec1cb1e8b4bcf63f402d295046b422b5"
+    },
+    {
+      "path": "vendor/anima_edit/configs/qwen3_06b/vocab.json",
+      "size": 2776833,
+      "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+    },
+    {
+      "path": "vendor/anima_edit/configs/t5_old/config.json",
+      "size": 1203,
+      "sha256": "36a166b5825808ff68969ee3b8b5dc6b08ed43a7631d4db708a368900eb1edf8"
+    },
+    {
+      "path": "vendor/anima_edit/configs/t5_old/spiece.model",
+      "size": 791656,
+      "sha256": "d60acb128cf7b7f2536e8f38a5b18a05535c9e14c7a355904270e15b0945ea86"
+    },
+    {
+      "path": "vendor/anima_edit/configs/t5_old/tokenizer.json",
+      "size": 1389353,
+      "sha256": "d2acde0d8d71dd30a711834b07781b9c89feaac33fd332f60507699282740066"
+    },
+    {
+      "path": "vendor/anima_edit/library/__init__.py",
+      "size": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "vendor/anima_edit/library/anima_edit_geometry.py",
+      "size": 7374,
+      "sha256": "66b346afc03f9676b7f8be5471fc20f17035cfe8ea8ae35a4aac25e74d4d604c"
+    },
+    {
+      "path": "vendor/anima_edit/library/anima_models.py",
+      "size": 312932,
+      "sha256": "2a31f5054e32e74ff6d4467f11cf12e2c6c3c5bfddac5a573a6e46d012df5e0b"
+    },
+    {
+      "path": "vendor/anima_edit/library/anima_reference_attributes.py",
+      "size": 7040,
+      "sha256": "78e5856b49d8e42516123dff6f8d2df0e9d6c053bbca4acbfb18e4abe095707b"
+    },
+    {
+      "path": "vendor/anima_edit/library/anima_reference_router.py",
+      "size": 30592,
+      "sha256": "5e4c95a150ac575ee89e746e64b464b3e871dbddc668fef4addea3ee961e6838"
+    },
+    {
+      "path": "vendor/anima_edit/library/anima_runtime_strategy.py",
+      "size": 3525,
+      "sha256": "9c8089cafef7cbfdd2de61d574d562cd4dc322f26f10fb61f8b9896137b802ea"
+    },
+    {
+      "path": "vendor/anima_edit/library/anima_text_conditioning.py",
+      "size": 12566,
+      "sha256": "90e847375a0ec920ee32793cafe42d339265b1b422a34813530b0bfb7d33182d"
+    },
+    {
+      "path": "vendor/anima_edit/library/anima_unified_ref_edit.py",
+      "size": 15677,
+      "sha256": "81c014c13e6267ca34174590bef8e58bd1f678a5b572b567377155887f5c250f"
+    },
+    {
+      "path": "vendor/anima_edit/library/anima_utils.py",
+      "size": 94600,
+      "sha256": "c2bb038cbf5351aa1bcb75b8521e6872460b9231c3843b1f9e860b1e5b46f4ab"
+    },
+    {
+      "path": "vendor/anima_edit/library/attention.py",
+      "size": 11409,
+      "sha256": "4aa915b41bfa157332960acf3340370b5da5f5ac4b01e1689ec4aaec47714cf0"
+    },
+    {
+      "path": "vendor/anima_edit/library/custom_offloading_utils.py",
+      "size": 13300,
+      "sha256": "e58750d0cd5e8c4d917d411cce5646d3a8ceabfc9d9c0ba55f81e56620cca075"
+    },
+    {
+      "path": "vendor/anima_edit/library/device_utils.py",
+      "size": 2705,
+      "sha256": "207e8042098773beda50378e80de2a50c216ed7ca3ba5bc023db00bbaf8285c3"
+    },
+    {
+      "path": "vendor/anima_edit/library/hunyuan_image_utils.py",
+      "size": 17300,
+      "sha256": "b9e4204c1aad7d3a07947948d16c80e15ae9486d781ed7611ff37ae11c1c15cd"
+    },
+    {
+      "path": "vendor/anima_edit/library/qwen_image_autoencoder_kl.py",
+      "size": 71042,
+      "sha256": "534c1a6e947ac87aee3b782083b1329c1187fe70b98d46ad44499750411fc9f9"
+    },
+    {
+      "path": "vendor/anima_edit/library/safetensors_utils.py",
+      "size": 20113,
+      "sha256": "9a344d05f78354674fff90751503a7bfdb25a1bb28e57100fdd8ecf2f9924184"
+    },
+    {
+      "path": "vendor/anima_edit/library/utils.py",
+      "size": 3741,
+      "sha256": "32907e62049a3f9b1868aaf81de7d69b55657cb907b934042a93902a9df17183"
+    }
+  ]
+}

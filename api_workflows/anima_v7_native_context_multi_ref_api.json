@@ -1,0 +1,88 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "reference_image_1.png"
+    },
+    "_meta": {
+      "title": "Reference Image 1 / slot 0"
+    }
+  },
+  "2": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "reference_image_2.png"
+    },
+    "_meta": {
+      "title": "Reference Image 2 / slot 1"
+    }
+  },
+  "3": {
+    "class_type": "AnimaNativeContextV7Loader",
+    "inputs": {
+      "checkpoint": "anima-native-context-v7-512-e4.safetensors",
+      "text_encoder": "qwen_3_06b_base.safetensors",
+      "vae": "qwen_image_vae.safetensors",
+      "offload_mode": "balanced",
+      "verify_file_sha256": false
+    },
+    "_meta": {
+      "title": "Anima Native Context V7 512 Loader"
+    }
+  },
+  "4": {
+    "class_type": "AnimaNativeContextV7MultiReference",
+    "inputs": {
+      "pipeline": [
+        "3",
+        0
+      ],
+      "reference_image_1": [
+        "1",
+        0
+      ],
+      "reference_image_2": [
+        "2",
+        0
+      ],
+      "prompt": "Take the pose and composition from the first reference and the character appearance and clothing from the second reference. Create a coherent anime illustration.",
+      "negative_prompt": "",
+      "seed": 20260807,
+      "width": 512,
+      "height": 512,
+      "steps": 30,
+      "cfg": 3.5,
+      "flow_shift": 5.0,
+      "reference_scale": 1.0,
+      "reference_max_area": 262144
+    },
+    "_meta": {
+      "title": "Anima V7 512 Multi Reference"
+    }
+  },
+  "5": {
+    "class_type": "PreviewImage",
+    "inputs": {
+      "images": [
+        "4",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Preview"
+    }
+  },
+  "6": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "4",
+        0
+      ],
+      "filename_prefix": "anima_v7_multi"
+    },
+    "_meta": {
+      "title": "Save"
+    }
+  }
+}

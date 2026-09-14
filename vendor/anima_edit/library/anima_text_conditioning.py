@@ -7,11 +7,12 @@ The standard Anima text path consumes four tensors:
 * neutral-T5 token IDs; and
 * the neutral-T5 attention mask.
 
-V4 competitive reference routing additionally consumes clause masks aligned to
-the *raw* Qwen sequence.  In classifier-free guidance (CFG), the negative
-branch must retain its own standard text tensors while reusing the positive
-branch's router-only tensors.  Keeping that split in one small module prevents
-the training sampler and the standalone inference script from drifting apart.
+Legacy V4 competitive routing additionally consumed parser-derived clause
+masks aligned to the *raw* Qwen sequence.  Native-context V7 deliberately does
+not: every visual candidate receives the exact full user prompt and structural
+image/source metadata travels through a non-text channel.  In classifier-free
+guidance (CFG), the negative branch still retains its own standard text tensors
+while reusing the positive branch's router-only raw prompt context.
 """
 
 from __future__ import annotations
@@ -121,10 +122,12 @@ def reference_router_requires_clause_masks(
     if routing_alpha <= 0.0:
         return False
     routing_mode = getattr(model, "native_reference_routing_mode", "legacy")
+    if routing_mode == "native_context_v1":
+        return False
     if routing_mode != "competitive_text_slot_v1":
         raise RuntimeError(
             "A positive native-reference routing alpha requires "
-            "competitive_text_slot_v1 mode."
+            "an integrated competitive routing mode."
         )
     return True
 
@@ -193,10 +196,10 @@ def prepare_anima_prompt_conditioning(
 ) -> AnimaPromptConditioning:
     """Validate and move raw Anima text outputs without applying the LLM adapter.
 
-    Clause masks are built only when ``require_reference_binding`` is true.
-    This preserves legacy alpha-zero and ordinary T2I behaviour while making
-    the positive-alpha competitive route fail closed on ambiguous,
-    non-canonical, or truncated reference instructions.
+    Clause masks are built only for an explicitly requested *legacy V4*
+    compatibility path. Native-context V7 callers leave
+    ``require_reference_binding=False``: the prompt is encoded once, unchanged,
+    and no hidden ``Use Image N`` instruction is inserted or required.
     """
 
     prompts = _normalise_prompts(prompt)

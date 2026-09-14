@@ -1,80 +1,8 @@
 {
-  "source_repository": "https://github.com/akatsuki-neo/anima-edit.git",
+  "schema": "anima-private-vendor/v2",
   "source_commit": "2ae811d296ff4159c6024c4a86415d19961a388c",
-  "source_branch": "codex/native-ref-v2-e120-cumulative-step",
-  "source_overlay": "v4-scaled-mixture-final49k-20260724",
-  "source_overlay_note": "Final competitive text-slot-router inference snapshot used by the formal scaled-mixture 49k run; hashes below are before the mechanical private-namespace import transform.",
-  "overlay_authoritative_files": [
-    {
-      "path": "anima_minimal_inference.py",
-      "sha256": "9aaf1b59e0820a1eb855e550341c79d184403c705dc15a137469061014b76c03"
-    },
-    {
-      "path": "library/anima_models.py",
-      "sha256": "ec9df3c0322ab4b24e077066e0f6ebc96d33bcd7c10e2ffa20cf325def0bd60b"
-    },
-    {
-      "path": "library/anima_reference_binding.py",
-      "sha256": "874d716914d5feaab3b6d75e680134c2dd56a6380d7e3faf461c54e7da86e723"
-    },
-    {
-      "path": "library/anima_reference_router.py",
-      "sha256": "71720ad923d661d4fad08e5436cc246602b9864b943a5c5d3cbf27409cfb8fdd"
-    },
-    {
-      "path": "library/anima_text_conditioning.py",
-      "sha256": "8c9512c74fc174db7fda2cf9940cb55e0230b57ba43d5dadd049f1181e0f4ed8"
-    },
-    {
-      "path": "library/anima_utils.py",
-      "sha256": "69f288613b2e264ef37c7599c26452469ede4fbce7b577d6bbfb8b9dacf01aeb"
-    },
-    {
-      "path": "library/strategy_anima.py",
-      "sha256": "41faf719292fd8e4dd566518f3789ff2872bd2cd0a75f4c721d6c662e6fc8643"
-    },
-    {
-      "path": "library/train_util.py",
-      "sha256": "9909d1fbb3278ff956176a13bde8abe4b694569dc4b993b0e14bdd27e7033a25"
-    }
-  ],
-  "source_archives": [
-    {
-      "scope": "base library, configs, inference, license, requirements",
-      "sha256": "4df2ffc7dd5efde322f66696c2607a9aea096b7abab2c608f4412eb8d00d023c"
-    },
-    {
-      "scope": "base networks",
-      "sha256": "8b4b5067f47649cf7d90c6212a910c8e3d8b5e7573889f80e6fa3d6a6c2a7358"
-    }
-  ],
-  "import_namespace": "_anima_native_ref_vendor",
-  "vendoring_transforms": [
-    {
-      "type": "absolute_import_namespace",
-      "source_packages": [
-        "library",
-        "networks"
-      ],
-      "target_prefix": "_anima_native_ref_vendor",
-      "scope": "Python import statements in the embedded source tree"
-    },
-    {
-      "type": "newline_normalization",
-      "value": "LF",
-      "scope": "authoritative overlay Python files"
-    },
-    {
-      "type": "package_initializers",
-      "paths": [
-        "__init__.py",
-        "networks/__init__.py"
-      ]
-    }
-  ],
-  "vendored_tree_hash_algorithm": "sha256(concat(sorted('<file_sha256>  <posix_path>\\n')))",
-  "vendored_tree_sha256": "67b25623eec3cb287c017b98255d9048bc8002869299a6a79a51f3bafabed251",
-  "file_count": 110,
+  "source_overlay": "v7-native-context-20260810",
+  "file_count": 26,
   "files": [
     {
       "path": "LICENSE.md",
@@ -85,11 +13,6 @@
       "path": "__init__.py",
       "size": 153,
       "sha256": "b199bf7fc58d64d479a68d25cf1d186033145d2d63e2e25db5ddf88b4c7aa817"
-    },
-    {
-      "path": "anima_minimal_inference.py",
-      "size": 64641,
-      "sha256": "9771379f8066106528f8b30508c05f01221f3f3433dbbdbeac1923407764e68d"
     },
     {
       "path": "configs/qwen3_06b/config.json",
@@ -137,49 +60,44 @@
       "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
     },
     {
-      "path": "library/adafactor_fused.py",
-      "size": 4376,
-      "sha256": "f300446a375002cba77f5ca44d1948a848666ca9b789987b911844e0786e79cc"
+      "path": "library/anima_edit_geometry.py",
+      "size": 7374,
+      "sha256": "66b346afc03f9676b7f8be5471fc20f17035cfe8ea8ae35a4aac25e74d4d604c"
     },
     {
       "path": "library/anima_models.py",
-      "size": 247121,
-      "sha256": "6fdf28f59c1e62b0ad61d14ecbd79bae0fbce94fd266490699cb0992a5c5e0c7"
+      "size": 312932,
+      "sha256": "2a31f5054e32e74ff6d4467f11cf12e2c6c3c5bfddac5a573a6e46d012df5e0b"
     },
     {
-      "path": "library/anima_reference_binding.py",
-      "size": 17784,
-      "sha256": "db2bdc6aceca0fb3c2b6b39b804c9ed6285cb32cabcfe23fedd675193fea2c3b"
+      "path": "library/anima_reference_attributes.py",
+      "size": 7040,
+      "sha256": "78e5856b49d8e42516123dff6f8d2df0e9d6c053bbca4acbfb18e4abe095707b"
     },
     {
       "path": "library/anima_reference_router.py",
-      "size": 18496,
-      "sha256": "0c4b3de0f578e7521ee74f5d8373a5006cbff046ebdabfa7e16787d006578613"
+      "size": 30592,
+      "sha256": "5e4c95a150ac575ee89e746e64b464b3e871dbddc668fef4addea3ee961e6838"
+    },
+    {
+      "path": "library/anima_runtime_strategy.py",
+      "size": 3525,
+      "sha256": "9c8089cafef7cbfdd2de61d574d562cd4dc322f26f10fb61f8b9896137b802ea"
     },
     {
       "path": "library/anima_text_conditioning.py",
-      "size": 12417,
-      "sha256": "8c9512c74fc174db7fda2cf9940cb55e0230b57ba43d5dadd049f1181e0f4ed8"
+      "size": 12566,
+      "sha256": "90e847375a0ec920ee32793cafe42d339265b1b422a34813530b0bfb7d33182d"
     },
     {
-      "path": "library/anima_train_utils.py",
-      "size": 50490,
-      "sha256": "c762fc084ab27ade4a8b46b67ffbed62f3f830d76e01631ea7b3ab007d88414a"
+      "path": "library/anima_unified_ref_edit.py",
+      "size": 15677,
+      "sha256": "81c014c13e6267ca34174590bef8e58bd1f678a5b572b567377155887f5c250f"
     },
     {
       "path": "library/anima_utils.py",
-      "size": 48889,
-      "sha256": "48344fe8b9236caa425c904a1a46bf1b9338fc5ec0e863467a21750b60050439"
-    },
-    {
-      "path": "library/anima_vlm.py",
-      "size": 31658,
-      "sha256": "5450a13b01719cb6b35fbd7ae8e98b3f8534cd617117f204dd9982dbaac6fafe"
-    },
-    {
-      "path": "library/anima_vlm_p1.py",
-      "size": 49154,
-      "sha256": "9068f5de1fd954c11613862757979d45d03917b218655617452b12a269faa31b"
+      "size": 94600,
+      "sha256": "c2bb038cbf5351aa1bcb75b8521e6872460b9231c3843b1f9e860b1e5b46f4ab"
     },
     {
       "path": "library/attention.py",
@@ -187,34 +105,9 @@
       "sha256": "4aa915b41bfa157332960acf3340370b5da5f5ac4b01e1689ec4aaec47714cf0"
     },
     {
-      "path": "library/attention_processors.py",
-      "size": 7697,
-      "sha256": "2a2ef9efa2208a357adb4b761aaae2e1177be87f37d14873cdd3effd527dcef1"
-    },
-    {
-      "path": "library/chroma_models.py",
-      "size": 28117,
-      "sha256": "9ac6d2b573ea6b1d65b6eacdbe672a0ac2039dbffc86cdc2020f1b262f806335"
-    },
-    {
-      "path": "library/config_util.py",
-      "size": 28617,
-      "sha256": "d76d5ae519849b10e4b21546740a90085fea9ae8da8d1d9b5d6e29f545fb3bf2"
-    },
-    {
       "path": "library/custom_offloading_utils.py",
       "size": 13300,
       "sha256": "e58750d0cd5e8c4d917d411cce5646d3a8ceabfc9d9c0ba55f81e56620cca075"
-    },
-    {
-      "path": "library/custom_train_functions.py",
-      "size": 22069,
-      "sha256": "309943ccea7bb051b3f01d919d1cafece3c2d1d53d425cd4fcc7ea6ed76a6ce9"
-    },
-    {
-      "path": "library/deepspeed_utils.py",
-      "size": 6928,
-      "sha256": "3c48dd3bb1a006ef81a027e6c0dc9f53dc5555e576a072bea705e9c855819558"
     },
     {
       "path": "library/device_utils.py",
@@ -222,129 +115,9 @@
       "sha256": "207e8042098773beda50378e80de2a50c216ed7ca3ba5bc023db00bbaf8285c3"
     },
     {
-      "path": "library/flux_models.py",
-      "size": 49420,
-      "sha256": "73b69dd6bcb3eee3c1d45b666380d096800c84e36e1e3da91da31efe6b90f222"
-    },
-    {
-      "path": "library/flux_train_utils.py",
-      "size": 27480,
-      "sha256": "1e3647b5d863d7ae6d1227593fccc63a05447d02bf56cf5603acb91d2459519b"
-    },
-    {
-      "path": "library/flux_utils.py",
-      "size": 23039,
-      "sha256": "276a782856315572c69a97d40b2d1bfd1904e15c6ec97b11911d641555948d7a"
-    },
-    {
-      "path": "library/fp8_optimization_utils.py",
-      "size": 20154,
-      "sha256": "847eb62bdc8e002c061d42ef1903a9a64344ad761e3b7698dd6d4b61fe69250b"
-    },
-    {
-      "path": "library/huggingface_util.py",
-      "size": 3148,
-      "sha256": "f58619e65753d98e958c9a0a326470a28c2a2121dd44074bb797d2f4da862d88"
-    },
-    {
-      "path": "library/hunyuan_image_models.py",
-      "size": 19484,
-      "sha256": "c825f153e2babf8fb5bda4438c49f4d1e0568183bfc306a7ad2e0be087f96f06"
-    },
-    {
-      "path": "library/hunyuan_image_modules.py",
-      "size": 31577,
-      "sha256": "cc9776504e26627fde36064429f22091edfe684f6394e8f07d92d3e45fd5386d"
-    },
-    {
-      "path": "library/hunyuan_image_text_encoder.py",
-      "size": 50623,
-      "sha256": "a2c7763ea5378ce2cc1b84a0b2d3442bf9ed10ec67d3b434cb602bc333a5d9b1"
-    },
-    {
       "path": "library/hunyuan_image_utils.py",
       "size": 17300,
       "sha256": "b9e4204c1aad7d3a07947948d16c80e15ae9486d781ed7611ff37ae11c1c15cd"
-    },
-    {
-      "path": "library/hunyuan_image_vae.py",
-      "size": 28824,
-      "sha256": "a0aa60e778a36eb991affa012364fffd87cd773827c82e6b04f9b4231930be6d"
-    },
-    {
-      "path": "library/hypernetwork.py",
-      "size": 6742,
-      "sha256": "de1bd85aad0d17b2401a17abae855160cf8e4e0cbcf8fb1787ada87fe1c263b1"
-    },
-    {
-      "path": "library/ipex/__init__.py",
-      "size": 11567,
-      "sha256": "bed784874ba5a222d589860d1f5e2d95fecfec9c4d8606abd64e5705d0b4a308"
-    },
-    {
-      "path": "library/ipex/attention.py",
-      "size": 6364,
-      "sha256": "39fb3e94f0bf044eff81da53bcfeb688fbb0ca84fd87e2787f573e275ff82858"
-    },
-    {
-      "path": "library/ipex/diffusers.py",
-      "size": 5400,
-      "sha256": "0381ecaf52de0eef04e4b27ab9f6ba469c70c9b548194458389d8bf915eaa7c2"
-    },
-    {
-      "path": "library/ipex/hijacks.py",
-      "size": 20585,
-      "sha256": "4446d11e570094c129a9b949bd516501a11ad8c8c9d6546780f70b84a38bfe0e"
-    },
-    {
-      "path": "library/jpeg_xl_util.py",
-      "size": 6595,
-      "sha256": "ed31189c5d23924d743730817c51f405937ca386ff8ae654e9e07200058aef42"
-    },
-    {
-      "path": "library/leco_train_util.py",
-      "size": 19205,
-      "sha256": "edf45a7c93df107f8ec4f31c6552b6638a4e3076fc2fc1af22cd69fd0c702d48"
-    },
-    {
-      "path": "library/lora_utils.py",
-      "size": 15644,
-      "sha256": "26c9e456c11582fc53c6b72d6d7686a31884bd10cd430e6ba32d9fd2436171b7"
-    },
-    {
-      "path": "library/lpw_stable_diffusion.py",
-      "size": 63481,
-      "sha256": "358e4894cb7bf13cfdc59b6c54cc303bafe4febe8c3966375d787870a1250003"
-    },
-    {
-      "path": "library/lumina_models.py",
-      "size": 54868,
-      "sha256": "f100322d9112b9fa8f484720dc18edeec794480f1e482a02ac576bc5de2b5a1a"
-    },
-    {
-      "path": "library/lumina_train_util.py",
-      "size": 49210,
-      "sha256": "fe0db21157fe8cd7cd31fb7e7aa48ae4c29d86f659e564e7279219b4ec4850d3"
-    },
-    {
-      "path": "library/lumina_util.py",
-      "size": 9782,
-      "sha256": "6a51806d67080adec88af7f71223b6626a5a46cab2d806cb968650ebd8415a85"
-    },
-    {
-      "path": "library/mask_generator.py",
-      "size": 13162,
-      "sha256": "3d338100690bd2775d064637c95505222fdb23ce174aa34623c2241ea2c7e606"
-    },
-    {
-      "path": "library/model_util.py",
-      "size": 58600,
-      "sha256": "67c6dac4c1aad45dda4725c1727abc191e74f1500cb9c7458fa65aae3cf874c9"
-    },
-    {
-      "path": "library/original_unet.py",
-      "size": 70656,
-      "sha256": "9f47853119722faf89f106b42af5109d56bdfed2a1a769718d2dfab837fdb396"
     },
     {
       "path": "library/qwen_image_autoencoder_kl.py",
@@ -357,274 +130,9 @@
       "sha256": "9a344d05f78354674fff90751503a7bfdb25a1bb28e57100fdd8ecf2f9924184"
     },
     {
-      "path": "library/sai_model_spec.py",
-      "size": 23651,
-      "sha256": "f2a1bba8c878c191664d955496d55c1c08f20b9dad5c4222d98f50fa7724971b"
-    },
-    {
-      "path": "library/sd3_models.py",
-      "size": 54693,
-      "sha256": "faa8d1865f95ba1269d5c92ac996499153634a6c4379e50a260c6b93706b54bc"
-    },
-    {
-      "path": "library/sd3_train_utils.py",
-      "size": 37227,
-      "sha256": "ff84a4ac5db2d587bd5bdb6a6bbf6a52aec2915730a78acd086fe5a0adb81c36"
-    },
-    {
-      "path": "library/sd3_utils.py",
-      "size": 10731,
-      "sha256": "9264e8c603d94c57d9599a56bc291e8f4312ee98e2f086fc1fa9ddbe8a794053"
-    },
-    {
-      "path": "library/sdxl_lpw_stable_diffusion.py",
-      "size": 65540,
-      "sha256": "b2dbc9cc9f5a398ae5adaf7cbcf38587e3f26e9bae0aa72e1079319085821fe1"
-    },
-    {
-      "path": "library/sdxl_model_util.py",
-      "size": 23042,
-      "sha256": "891eaaf1ec3abb1b0507ef4403703c94808576dd38f95fe23e2cea767053d25d"
-    },
-    {
-      "path": "library/sdxl_original_control_net.py",
-      "size": 10080,
-      "sha256": "1c95aeff88486078573c6f4b5caab1b3db92fefd78b48dbf9eef61433c968c54"
-    },
-    {
-      "path": "library/sdxl_original_unet.py",
-      "size": 45808,
-      "sha256": "1b9b6f1ff3ded4e907c0e55afa109173aad95c7ec19121b6ceddd67faca6ebbd"
-    },
-    {
-      "path": "library/sdxl_train_util.py",
-      "size": 15107,
-      "sha256": "ab224fef0ff6267153ff4e0455512ece30e01f19db15955a7a473a46987c9eae"
-    },
-    {
-      "path": "library/slicing_vae.py",
-      "size": 24399,
-      "sha256": "23f267fd54c77ef10a6fce276d6537fac20eea5221b200bb9e0e9b6e6b4d3d23"
-    },
-    {
-      "path": "library/strategy_anima.py",
-      "size": 28078,
-      "sha256": "677241157c2116ac7a8287ba36f4866e8d4f551a76aab3ecb4f056d7fe7eb937"
-    },
-    {
-      "path": "library/strategy_base.py",
-      "size": 26320,
-      "sha256": "7a851ad91e6db04d9cfb02e6c772e4f00b96d65a9d010fa75b9c8d84a7257816"
-    },
-    {
-      "path": "library/strategy_flux.py",
-      "size": 11349,
-      "sha256": "33cbfa9b90d6ebdcc9a7b4f84064f0e37d7242bd26bb1918d53c3a37c95cecf1"
-    },
-    {
-      "path": "library/strategy_hunyuan_image.py",
-      "size": 9327,
-      "sha256": "4089a1da1f106fe3bb9646a3dab754631d6fe33ce36726abbf588c44fe8539c0"
-    },
-    {
-      "path": "library/strategy_lumina.py",
-      "size": 12465,
-      "sha256": "3320b39ab6e69431ec96d6b0bfa75a81d11d438b651d1333fc458d053b58faa5"
-    },
-    {
-      "path": "library/strategy_sd.py",
-      "size": 8702,
-      "sha256": "869c019bcb088e1f8b1407efa93d037cecddbc4615677ef6cbaaa16bd2298487"
-    },
-    {
-      "path": "library/strategy_sd3.py",
-      "size": 19132,
-      "sha256": "2d9de49f1da08deca0eb0993833940ecaa543badd3733913cbfd55d768dfdfb2"
-    },
-    {
-      "path": "library/strategy_sdxl.py",
-      "size": 14376,
-      "sha256": "e109bb8ed50294f24f2ef1529fe9395732bedc9c68ae198e3570c6cf1b75c310"
-    },
-    {
-      "path": "library/train_util.py",
-      "size": 361156,
-      "sha256": "546dc67f15f4a80c474bd3d98bd40345752ff2abfa08dd40dfab31e5eb07b79e"
-    },
-    {
       "path": "library/utils.py",
-      "size": 20065,
-      "sha256": "e5693231f3d9265e21ab6363fd585376b6ee906f5eb08427f0a71933cdc6094b"
-    },
-    {
-      "path": "networks/__init__.py",
-      "size": 66,
-      "sha256": "1d17bc46e4bfce28980a78ba60272de78fdd9af64b18975a7555f69273d23408"
-    },
-    {
-      "path": "networks/check_lora_weights.py",
-      "size": 1513,
-      "sha256": "42587ec94c3b066332f55ce2f7304a45e918102403556594a36ff9883bfc2da8"
-    },
-    {
-      "path": "networks/control_net_lllite.py",
-      "size": 19212,
-      "sha256": "f917e9aeb7e30160f92b9012d9d92c7020d21442161ff70bd6d1bb72b938ec86"
-    },
-    {
-      "path": "networks/control_net_lllite_anima.py",
-      "size": 37864,
-      "sha256": "8c2989779af6dbd807336d2ab8b4ce58ba0c9bd400db86778c3be14db4aff11a"
-    },
-    {
-      "path": "networks/control_net_lllite_for_train.py",
-      "size": 20984,
-      "sha256": "573811b3be4a5ed81da1888d183fe9326fcddcf392dcea3d7b573839aa84ca1e"
-    },
-    {
-      "path": "networks/convert_anima_lora_to_comfy.py",
-      "size": 7685,
-      "sha256": "5cf3cc632603ff69012c475ffc5d81f01682829b4f76ea201e116a0e05eca80d"
-    },
-    {
-      "path": "networks/convert_flux_lora.py",
-      "size": 20114,
-      "sha256": "cc5b2965b8d8a4926a168ab82ea6bb3d3a3b6dd6b5c9157f53d4e478d80f250f"
-    },
-    {
-      "path": "networks/convert_hunyuan_image_lora_to_comfy.py",
-      "size": 2793,
-      "sha256": "fe7c38575b8f43b193857dfb5b2968d3a49d431844cce78cd57b1941955dcc4a"
-    },
-    {
-      "path": "networks/dora.py",
-      "size": 25808,
-      "sha256": "e0808bb03f3d9257dc4b5f0445da31adb633ddc6025628a1e17ce70084572e34"
-    },
-    {
-      "path": "networks/dylora.py",
-      "size": 21365,
-      "sha256": "c4dd9037135c40d1ee6d3c0b18a0e43e17ed789c27bec8290d53bdf9b113eb26"
-    },
-    {
-      "path": "networks/extract_lora_from_dylora.py",
-      "size": 4338,
-      "sha256": "d5509289850bfb77700a2a93bd729686a129ee7ae2d5381c4378917c55ea4817"
-    },
-    {
-      "path": "networks/extract_lora_from_models.py",
-      "size": 14093,
-      "sha256": "8b3e5a1d60efbffe1640461410e68525447f4a274740f05b2fc7bbb5d1130b10"
-    },
-    {
-      "path": "networks/flux_extract_lora.py",
-      "size": 7673,
-      "sha256": "811b5380bec0b8b2ce36fd837aeff2e9156453bf8288bfed6a8a60b9ad300392"
-    },
-    {
-      "path": "networks/flux_merge_lora.py",
-      "size": 33630,
-      "sha256": "deb3a8944508a3b4c541187ba60237a1db7269b2a0af97c85d10baea12d9386c"
-    },
-    {
-      "path": "networks/loha.py",
-      "size": 24267,
-      "sha256": "2b48d69b0d687272ecfbc882b946fd6e2575e6e14bfa37cb35d1ff77f5af25e8"
-    },
-    {
-      "path": "networks/lokr.py",
-      "size": 24285,
-      "sha256": "73fdb45fea8440cd89332e29be8bbefa147feb5e287ae0019f86fa9fd92f6dc2"
-    },
-    {
-      "path": "networks/lora.py",
-      "size": 59104,
-      "sha256": "884e34f582c01bdbe425b5cab552cf6a105c35e68f7b8b9b675290ff63cbcd1f"
-    },
-    {
-      "path": "networks/lora_anima.py",
-      "size": 33984,
-      "sha256": "b1df0f693eac0c36d3217cff1f286151a98e635cd925d9ccd255883c5c4f710b"
-    },
-    {
-      "path": "networks/lora_diffusers.py",
-      "size": 25958,
-      "sha256": "43263856b084a6dd88a9f9b9e0960b9b05a5f65d7d6620b6caa327e054d33273"
-    },
-    {
-      "path": "networks/lora_fa.py",
-      "size": 50887,
-      "sha256": "f736738c07ddd85f2976ca1280e7ca1e91a1052b3d97ce81bd7373f571097106"
-    },
-    {
-      "path": "networks/lora_flux.py",
-      "size": 61423,
-      "sha256": "9b2740944db4a74934c839834126743c03bfb593cbcfa2037195e37f3d2d6c40"
-    },
-    {
-      "path": "networks/lora_hunyuan_image.py",
-      "size": 14831,
-      "sha256": "ffed77be375a7d68648ef08898bdbd9e285b151eee6eff2a0aa8ea59cec4b186"
-    },
-    {
-      "path": "networks/lora_interrogator.py",
-      "size": 6235,
-      "sha256": "48e4e2cd2fa487771487102af75639e88dbf0ca652f77506ced4fe5780093e4b"
-    },
-    {
-      "path": "networks/lora_lumina.py",
-      "size": 46193,
-      "sha256": "21df3d3a13fea6cc5eee59173884cdc13593d50b78754c6c31ccd4c0f1e59f39"
-    },
-    {
-      "path": "networks/lora_sd3.py",
-      "size": 35840,
-      "sha256": "127b9806bbe9f3428c3666ac3e93ae294141d34a45c793c9ed21b9b452bc7671"
-    },
-    {
-      "path": "networks/merge_lora.py",
-      "size": 14890,
-      "sha256": "c655f36850381747e7b075f120b038223c81b1ca325c0f841353562185cd1efa"
-    },
-    {
-      "path": "networks/merge_lora_old.py",
-      "size": 7416,
-      "sha256": "914c64291101510db8f585b041197a7fb2bf0dffaaca9d35efbd262a29b02423"
-    },
-    {
-      "path": "networks/network_base.py",
-      "size": 24180,
-      "sha256": "9d00c71127af77d2c586c68dbfa53b0ddc51288181e532042b1590bca2628b7f"
-    },
-    {
-      "path": "networks/oft.py",
-      "size": 16346,
-      "sha256": "3ef0257e0961e71c814d336fa8e5a2ad6b0906c725abd41717597f61c97e13d4"
-    },
-    {
-      "path": "networks/oft_flux.py",
-      "size": 16750,
-      "sha256": "06be30512a1cd1dd62530cadbeff707c5ce4fc7476d885a2192c95e7c61f45e4"
-    },
-    {
-      "path": "networks/resize_lora.py",
-      "size": 16135,
-      "sha256": "3abc60090e65fff9c22cc0493653aaaaabdafd4c38ee00c514c23a02acfd725a"
-    },
-    {
-      "path": "networks/sdxl_merge_lora.py",
-      "size": 20938,
-      "sha256": "34446ac337dab8f1420186b378f996bf27d78207ec863ea1a72b22bfc4bd6410"
-    },
-    {
-      "path": "networks/svd_merge_lora.py",
-      "size": 17747,
-      "sha256": "05229e70c8cd8efae2815270b1a810a275c6c4b5be24deb6229bb42b266b3fa2"
-    },
-    {
-      "path": "requirements.txt",
-      "size": 915,
-      "sha256": "dc4325b9f2504705faf4ddd1ddf5238e48c65ef3953a7072c4e2907e43be11e7"
+      "size": 3741,
+      "sha256": "32907e62049a3f9b1868aaf81de7d69b55657cb907b934042a93902a9df17183"
     }
   ]
 }

@@ -1,0 +1,75 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "reference_image_1.png"
+    },
+    "_meta": {
+      "title": "Reference Image 1 / slot 0"
+    }
+  },
+  "2": {
+    "class_type": "AnimaNativeContextV7Loader",
+    "inputs": {
+      "checkpoint": "anima-native-context-v7-512-e4.safetensors",
+      "text_encoder": "qwen_3_06b_base.safetensors",
+      "vae": "qwen_image_vae.safetensors",
+      "offload_mode": "balanced",
+      "verify_file_sha256": false
+    },
+    "_meta": {
+      "title": "Anima Native Context V7 512 Loader"
+    }
+  },
+  "3": {
+    "class_type": "AnimaNativeContextV7SingleReference",
+    "inputs": {
+      "pipeline": [
+        "2",
+        0
+      ],
+      "reference_image": [
+        "1",
+        0
+      ],
+      "prompt": "Generate a new anime illustration preserving the referenced character's identity and clothing, with a different pose and composition.",
+      "negative_prompt": "",
+      "seed": 20260807,
+      "width": 512,
+      "height": 512,
+      "steps": 30,
+      "cfg": 3.5,
+      "flow_shift": 5.0,
+      "reference_scale": 1.0,
+      "reference_max_area": 262144
+    },
+    "_meta": {
+      "title": "Anima V7 512 Single Reference"
+    }
+  },
+  "4": {
+    "class_type": "PreviewImage",
+    "inputs": {
+      "images": [
+        "3",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Preview"
+    }
+  },
+  "5": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "3",
+        0
+      ],
+      "filename_prefix": "anima_v7_single"
+    },
+    "_meta": {
+      "title": "Save"
+    }
+  }
+}

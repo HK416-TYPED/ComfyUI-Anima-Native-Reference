@@ -1,0 +1,74 @@
+{
+  "1": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "source_image.png"
+    },
+    "_meta": {
+      "title": "Editable source / Image 1"
+    }
+  },
+  "2": {
+    "class_type": "AnimaNativeContextV7Loader",
+    "inputs": {
+      "checkpoint": "anima-native-context-v7-512-e4.safetensors",
+      "text_encoder": "qwen_3_06b_base.safetensors",
+      "vae": "qwen_image_vae.safetensors",
+      "offload_mode": "balanced",
+      "verify_file_sha256": false
+    },
+    "_meta": {
+      "title": "Anima Native Context V7 512 Loader"
+    }
+  },
+  "3": {
+    "class_type": "AnimaNativeContextV7Edit",
+    "inputs": {
+      "pipeline": [
+        "2",
+        0
+      ],
+      "source_image": [
+        "1",
+        0
+      ],
+      "prompt": "Change the character's outfit to a blue jacket while preserving identity, pose, composition, and background.",
+      "negative_prompt": "",
+      "seed": 20260807,
+      "width": 512,
+      "height": 512,
+      "steps": 30,
+      "cfg": 3.5,
+      "flow_shift": 5.0,
+      "reference_scale": 1.4
+    },
+    "_meta": {
+      "title": "Anima V7 512 Maskless Edit"
+    }
+  },
+  "4": {
+    "class_type": "PreviewImage",
+    "inputs": {
+      "images": [
+        "3",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Preview"
+    }
+  },
+  "5": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "3",
+        0
+      ],
+      "filename_prefix": "anima_v7_edit"
+    },
+    "_meta": {
+      "title": "Save"
+    }
+  }
+}

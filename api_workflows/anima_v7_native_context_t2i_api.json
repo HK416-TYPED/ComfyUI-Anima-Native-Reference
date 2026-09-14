@@ -1,0 +1,60 @@
+{
+  "1": {
+    "class_type": "AnimaNativeContextV7Loader",
+    "inputs": {
+      "checkpoint": "anima-native-context-v7-512-e4.safetensors",
+      "text_encoder": "qwen_3_06b_base.safetensors",
+      "vae": "qwen_image_vae.safetensors",
+      "offload_mode": "balanced",
+      "verify_file_sha256": false
+    },
+    "_meta": {
+      "title": "Anima Native Context V7 512 Loader"
+    }
+  },
+  "2": {
+    "class_type": "AnimaNativeContextV7T2I",
+    "inputs": {
+      "pipeline": [
+        "1",
+        0
+      ],
+      "prompt": "masterpiece, best quality, anime illustration, one girl, detailed eyes",
+      "negative_prompt": "",
+      "seed": 20260807,
+      "width": 512,
+      "height": 512,
+      "steps": 30,
+      "cfg": 3.5,
+      "flow_shift": 5.0
+    },
+    "_meta": {
+      "title": "Anima V7 512 T2I (true no-image bypass)"
+    }
+  },
+  "3": {
+    "class_type": "PreviewImage",
+    "inputs": {
+      "images": [
+        "2",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "Preview"
+    }
+  },
+  "4": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "images": [
+        "2",
+        0
+      ],
+      "filename_prefix": "anima_v7_t2i"
+    },
+    "_meta": {
+      "title": "Save"
+    }
+  }
+}
